@@ -244,37 +244,6 @@ class GonkaBenchmark:
             "total_checked": self.total_checked,
         }
 
-    def auto_detect_batch_size(self) -> int:
-        """Автоматически определяет оптимальный batch_size"""
-        log_info("Автоподбор batch_size...")
-
-        # Получаем информацию о GPU
-        if torch.cuda.is_available():
-            gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            log_info(f"GPU память: {gpu_memory_gb:.1f} GB")
-
-            # Эвристика на основе реальных данных:
-            # H200 (140GB) → 747 batch
-            # B300 (267GB) → 1780 batch
-            if gpu_memory_gb > 120:
-                # Для больших GPU (H200, B300)
-                estimated_batch = int(gpu_memory_gb * 5.5)
-                max_batch = 2048
-            else:
-                # Для остальных GPU
-                estimated_batch = int((gpu_memory_gb - 30) * 3)
-                max_batch = 512
-
-            estimated_batch = max(64, min(estimated_batch, max_batch))
-
-            # Округляем до кратного 64
-            estimated_batch = (estimated_batch // 64) * 64
-
-            log_info(f"Расчётный batch_size: {estimated_batch}")
-            return estimated_batch
-        else:
-            return 32  # Для CPU маленький batch
-
     def run(self) -> dict:
         """Запускает бенчмарк"""
         self.print_header()
@@ -284,14 +253,9 @@ class GonkaBenchmark:
         if Compute is None:
             return None
 
-        # Определяем batch_size
-        if self.batch_size is None:
-            self.batch_size = self.auto_detect_batch_size()
-
         # Создаём параметры модели
         params = Params(**POC_PARAMS)
         log_info(f"Параметры PoC V2: dim={params.dim}, layers={params.n_layers}, seq_len={params.seq_len}")
-        log_info(f"Используемый batch_size: {self.batch_size}")
 
         try:
             # Инициализируем Compute
@@ -317,6 +281,10 @@ class GonkaBenchmark:
             import traceback
             traceback.print_exc()
             return None
+
+        # Получаем batch_size из gonka (autobs_v2.py)
+        self.batch_size = self.compute.batch_size
+        log_info(f"batch_size из gonka autobs: {self.batch_size}")
 
         # Запуск бенчмарка
         log_info(f"Запуск бенчмарка на {self.duration_sec / 60:.1f} минут...")
