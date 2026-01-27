@@ -195,7 +195,40 @@ class WorkerProcess(mp.Process):
     def _suppress_model_logs(self):
         """Подавляет логи модели (прогресс-бары)"""
         import logging
+        import os
+        import sys
+
+        # Подавляем logging
+        logging.getLogger('pow').setLevel(logging.WARNING)
+        logging.getLogger('pow.compute').setLevel(logging.WARNING)
         logging.getLogger('pow.compute.model_init').setLevel(logging.WARNING)
+
+        # Подавляем tqdm progress bars
+        os.environ['TQDM_DISABLE'] = '1'
+
+    def _get_gpu_stats(self):
+        """Получает статистику GPU для этого worker'а"""
+        stats = {}
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+
+            for device_id in self.device_ids:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                power = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000
+
+                stats[device_id] = {
+                    'vram_percent': round(mem_info.used / mem_info.total * 100, 1),
+                    'gpu_util': util.gpu,
+                    'power_watts': round(power, 1)
+                }
+
+            pynvml.nvmlShutdown()
+        except Exception:
+            pass
+        return stats
 
     def run(self):
         """Основной цикл worker'а"""
@@ -244,11 +277,17 @@ class WorkerProcess(mp.Process):
                 self.total_checked += len(nonces)
                 self.total_valid += len(valid_batch.nonces)
 
+                # Получаем GPU статистику (не каждый раз, каждую ~10 итерацию)
+                gpu_stats = {}
+                if self.total_valid % 10 == 0:
+                    gpu_stats = self._get_gpu_stats()
+
                 # Отправляем результат в очередь
                 self.result_queue.put({
                     'worker_id': self.worker_id,
                     'total_valid': self.total_valid,
                     'total_checked': self.total_checked,
+                    'gpu_stats': gpu_stats,
                 })
 
             # Очистка
@@ -301,34 +340,6 @@ class GonkaBenchmark:
         # Compute объект
         self.compute = None
         self.target = None
-
-    def get_per_gpu_stats(self) -> List[Dict]:
-        """Получает статистику по каждому GPU"""
-        stats = []
-        try:
-            import pynvml
-            pynvml.nvmlInit()
-
-            for device_id in self.device_ids:
-                handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
-                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                power = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000  # Вт
-
-                stats.append({
-                    'device_id': device_id,
-                    'name': pynvml.nvmlDeviceGetName(handle).decode('utf-8'),
-                    'vram_used_gb': round(mem_info.used / (1024**3), 2),
-                    'vram_total_gb': round(mem_info.total / (1024**3), 2),
-                    'vram_percent': round(mem_info.used / mem_info.total * 100, 1),
-                    'gpu_util': util.gpu,
-                    'power_watts': round(power, 1)
-                })
-
-            pynvml.nvmlShutdown()
-        except Exception:
-            pass  # pynvml недоступен
-        return stats
 
     def print_header(self):
         """Выводит заголовок бенчмарка"""
@@ -489,7 +500,7 @@ class GonkaBenchmark:
             worker.start()
 
         # Собираем результаты и показываем прогресс
-        worker_stats = {i: {'total_valid': 0, 'total_checked': 0} for i in range(self.num_gpus)}
+        worker_stats = {i: {'total_valid': 0, 'total_checked': 0, 'gpu_stats': {}} for i in range(self.num_gpus)}
         last_report_time = start_time
         report_interval = 30
 
@@ -507,6 +518,9 @@ class GonkaBenchmark:
                     worker_id = result['worker_id']
                     worker_stats[worker_id]['total_valid'] = result['total_valid']
                     worker_stats[worker_id]['total_checked'] = result['total_checked']
+                    # Обновляем GPU статистику если она есть
+                    if result.get('gpu_stats'):
+                        worker_stats[worker_id]['gpu_stats'] = result['gpu_stats']
 
                 except:
                     pass  # Таймаут - нормально, продолжаем
@@ -529,22 +543,16 @@ class GonkaBenchmark:
                           f"valid: {total_valid} | poc_weight: {poc_w} | "
                           f"1 in {one_in:.0f} | valid/min: {valid_rate:.1f} | raw/min: {raw_rate:.1f}")
 
-                    # Получаем статистику по каждому GPU
-                    gpu_stats = self.get_per_gpu_stats()
-
                     # Показываем статистику по каждому worker
-                    worker_parts = []
                     for i in range(self.num_gpus):
                         wv = worker_stats[i]['total_valid']
-                        if gpu_stats and i < len(gpu_stats):
-                            gs = gpu_stats[i]
-                            worker_parts.append(f"W{i}:{wv} ({gs['vram_percent']}% VRAM, {gs['gpu_util']}% GPU, {gs['power_watts']}W)")
+                        gs = worker_stats[i].get('gpu_stats', {})
+                        # gpu_stats - это {device_id: {vram_percent, gpu_util, power_watts}}
+                        if gs and self.device_ids[i] in gs:
+                            g = gs[self.device_ids[i]]
+                            print(f"                     W{i}:{wv} ({g['vram_percent']}% VRAM, {g['gpu_util']}% GPU, {g['power_watts']}W)")
                         else:
-                            worker_parts.append(f"W{i}:{wv}")
-
-                    # Выводим статистику по worker'ам
-                    for part in worker_parts:
-                        print(f"                     {part}")
+                            print(f"                     W{i}:{wv}")
 
                     print(f"                     {datetime.now().strftime('%H:%M:%S')}")
 
