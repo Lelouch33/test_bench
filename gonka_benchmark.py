@@ -180,18 +180,18 @@ class GonkaBenchmark:
         print("║" + " " * 15 + "Gonka PoW Benchmark v1.1" + " " * 19 + "║")
         print("╠" + "═" * 60 + "╣")
 
-        # Ручное выравнивание
+        # Ручное выравнивание (+3 пробела)
         gpu_line = "║  GPU: " + gpu_name
-        print(gpu_line + " " * (60 - 2 - len(gpu_line)) + "║")
+        print(gpu_line + " " * (63 - 2 - len(gpu_line)) + "║")
 
         cuda_line = "║  CUDA: " + str(cuda_version)
-        print(cuda_line + " " * (60 - 2 - len(cuda_line)) + "║")
+        print(cuda_line + " " * (63 - 2 - len(cuda_line)) + "║")
 
         dur_line = f"║  Test duration: {int(self.duration_sec // 60)} minutes"
-        print(dur_line + " " * (60 - 2 - len(dur_line)) + "║")
+        print(dur_line + " " * (63 - 2 - len(dur_line)) + "║")
 
         rtarget_line = f"║  RTarget: {self.r_target}"
-        print(rtarget_line + " " * (60 - 2 - len(rtarget_line)) + "║")
+        print(rtarget_line + " " * (63 - 2 - len(rtarget_line)) + "║")
 
         print("╚" + "═" * 60 + "╝")
         print(f"{Colors.END}")
