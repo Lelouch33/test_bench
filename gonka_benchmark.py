@@ -105,7 +105,6 @@ def setup_gonka_path(gonka_path: str) -> bool:
     paths_to_add = [
         gonka_path / "mlnode" / "packages" / "pow" / "src",
         gonka_path / "mlnode" / "packages" / "common" / "src",
-        gonka_path / "common" / "src",
     ]
 
     for path in paths_to_add:
@@ -256,7 +255,8 @@ class GonkaBenchmark:
 
         # Создаём параметры модели
         params = Params(**POC_PARAMS)
-        log_info(f"Параметры PoC V2: dim={params.dim}, layers={params.n_layers}, seq_len={params.seq_len}")
+        params_str = f"Params(dim={params.dim}, n_layers={params.n_layers}, n_heads={params.n_heads}, n_kv_heads={params.n_kv_heads}, vocab_size={params.vocab_size}, ffn_dim_multiplier={params.ffn_dim_multiplier}, multiple_of={params.multiple_of}, norm_eps={params.norm_eps}, rope_theta={params.rope_theta}, use_scaled_rope={params.use_scaled_rope}, seq_len={params.seq_len})"
+        log_info(f"params={params_str}")
 
         try:
             # Инициализируем Compute
@@ -286,7 +286,7 @@ class GonkaBenchmark:
         # Определяем batch_size через gonka autobs_v2.py
         gpu_group = GpuGroup(devices=[self.device.index if torch.cuda.is_available() else 0])
         self.batch_size = get_batch_size_for_gpu_group(gpu_group, params)
-        log_info(f"batch_size из gonka autobs_v2: {self.batch_size}")
+        log_info(f"Using batch size: {self.batch_size} for GPU group [{gpu_group.primary_device}]")
 
         # Запуск бенчмарка
         log_info(f"Запуск бенчмарка на {self.duration_sec / 60:.1f} минут...")
