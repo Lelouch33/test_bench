@@ -175,6 +175,7 @@ class GonkaBenchmark:
         if len(gpu_name) > 38:
             gpu_name = gpu_name[:35] + "..."
 
+        print()  # Отступ перед рамкой
         print(f"{Colors.BOLD}{Colors.CYAN}", end="")
         print("╔" + "═" * 60 + "╗")
         print("║" + " " * 15 + "Gonka PoW Benchmark v1.1" + " " * 19 + "║")
