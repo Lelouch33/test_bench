@@ -192,9 +192,17 @@ class WorkerProcess(mp.Process):
         self.total_valid = 0
         self.total_checked = 0
 
+    def _suppress_model_logs(self):
+        """Подавляет логи модели (прогресс-бары)"""
+        import logging
+        logging.getLogger('pow.compute.model_init').setLevel(logging.WARNING)
+
     def run(self):
         """Основной цикл worker'а"""
         try:
+            # Подавляем логи модели (прогресс-бары)
+            self._suppress_model_logs()
+
             # Импортируем внутри процесса
             from pow.compute.compute import Compute
 
@@ -293,6 +301,34 @@ class GonkaBenchmark:
         # Compute объект
         self.compute = None
         self.target = None
+
+    def get_per_gpu_stats(self) -> List[Dict]:
+        """Получает статистику по каждому GPU"""
+        stats = []
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+
+            for device_id in self.device_ids:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                power = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000  # Вт
+
+                stats.append({
+                    'device_id': device_id,
+                    'name': pynvml.nvmlDeviceGetName(handle).decode('utf-8'),
+                    'vram_used_gb': round(mem_info.used / (1024**3), 2),
+                    'vram_total_gb': round(mem_info.total / (1024**3), 2),
+                    'vram_percent': round(mem_info.used / mem_info.total * 100, 1),
+                    'gpu_util': util.gpu,
+                    'power_watts': round(power, 1)
+                })
+
+            pynvml.nvmlShutdown()
+        except Exception:
+            pass  # pynvml недоступен
+        return stats
 
     def print_header(self):
         """Выводит заголовок бенчмарка"""
@@ -493,9 +529,24 @@ class GonkaBenchmark:
                           f"valid: {total_valid} | poc_weight: {poc_w} | "
                           f"1 in {one_in:.0f} | valid/min: {valid_rate:.1f} | raw/min: {raw_rate:.1f}")
 
+                    # Получаем статистику по каждому GPU
+                    gpu_stats = self.get_per_gpu_stats()
+
                     # Показываем статистику по каждому worker
-                    worker_str = " | ".join([f"W{i}:{worker_stats[i]['total_valid']}" for i in range(self.num_gpus)])
-                    print(f"                     {worker_str} | {datetime.now().strftime('%H:%M:%S')}")
+                    worker_parts = []
+                    for i in range(self.num_gpus):
+                        wv = worker_stats[i]['total_valid']
+                        if gpu_stats and i < len(gpu_stats):
+                            gs = gpu_stats[i]
+                            worker_parts.append(f"W{i}:{wv} ({gs['vram_percent']}% VRAM, {gs['gpu_util']}% GPU, {gs['power_watts']}W)")
+                        else:
+                            worker_parts.append(f"W{i}:{wv}")
+
+                    # Выводим статистику по worker'ам
+                    for part in worker_parts:
+                        print(f"                     {part}")
+
+                    print(f"                     {datetime.now().strftime('%H:%M:%S')}")
 
                     last_report_time = current_time
 
