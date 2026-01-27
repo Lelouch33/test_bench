@@ -220,13 +220,14 @@ class WorkerProcess(mp.Process):
                 nonces = next_nonces
                 next_nonces = [next(self.nonce_iterator) for _ in range(self.batch_size)]
 
-                # Выполняем вычисления
-                proof_batch = self.compute(
+                # Выполняем вычисления (возвращает Future)
+                future = self.compute(
                     nonces=nonces,
                     public_key=self.public_key,
                     target=self.compute.target,
                     next_nonces=next_nonces,
                 )
+                proof_batch = future.result()  # Получаем результат из Future
 
                 # Фильтруем по r_target
                 valid_batch = proof_batch.sub_batch(self.r_target)
