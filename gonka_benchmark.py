@@ -299,6 +299,36 @@ class GonkaBenchmark:
 
         print()
 
+        # Функция для получения GPU статистики
+        def get_gpu_stats():
+            if not torch.cuda.is_available():
+                return None
+            try:
+                import subprocess
+                result = subprocess.run([
+                    'nvidia-smi',
+                    '--query-gpu=memory.used,memory.total,utilization.gpu,power.draw',
+                    '--format=csv,noheader,nounits',
+                ], capture_output=True, text=True, timeout=2)
+                if result.returncode == 0:
+                    values = result.stdout.strip().split(', ')
+                    if len(values) >= 4:
+                        mem_used = int(values[0])
+                        mem_total = int(values[1])
+                        gpu_util = int(values[2])
+                        power = float(values[3])
+                        mem_percent = (mem_used / mem_total) * 100
+                        return {
+                            'mem_used_mb': mem_used // 1024,
+                            'mem_total_mb': mem_total // 1024,
+                            'mem_percent': mem_percent,
+                            'gpu_util': gpu_util,
+                            'power_w': power
+                        }
+            except:
+                pass
+            return None
+
         try:
             with torch.no_grad():
                 while time.time() < end_time:
@@ -327,7 +357,7 @@ class GonkaBenchmark:
                     if self.save_nonces and len(valid_batch.nonces) > 0:
                         self.all_valid_nonces.extend(valid_batch.nonces)
 
-                    # Прогресс-бар каждые 30 секунд
+                    # Прогресс-бар каждые 30 секунд с GPU статистикой
                     current_time = time.time()
                     if current_time - last_report_time >= report_interval:
                         elapsed = current_time - self.start_time
@@ -337,9 +367,19 @@ class GonkaBenchmark:
                         one_in = self.total_checked / self.total_valid if self.total_valid > 0 else 0
                         poc_w = int(self.total_valid * WEIGHT_SCALE_FACTOR)
 
+                        gpu_stats = get_gpu_stats()
+                        if gpu_stats:
+                            gpu_line = (f"VRAM: {gpu_stats['mem_used_mb']}GB/{gpu_stats['mem_total_mb']}GB "
+                                         f"({gpu_stats['mem_percent']:.1f}%) | "
+                                         f"GPU: {gpu_stats['gpu_util']}% | "
+                                         f"PWR: {gpu_stats['power_w']:.0f}W")
+                        else:
+                            gpu_line = "GPU: N/A"
+
                         print(f"[{int(elapsed//60):02d}:{int(elapsed%60):02d}] "
                               f"valid: {self.total_valid} | poc_weight: {poc_w} | "
                               f"1 in {one_in:.0f} | valid/min: {valid_rate:.1f} | raw/min: {raw_rate:.1f}")
+                        print(f"                     {gpu_line}")
 
                         last_report_time = current_time
 
