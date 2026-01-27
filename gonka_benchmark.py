@@ -171,20 +171,20 @@ class GonkaBenchmark:
         gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
         cuda_version = torch.version.cuda or "N/A"
 
-        # Обрезаем длинные имена GPU
-        max_gpu_len = 45
-        if len(gpu_name) > max_gpu_len:
-            gpu_name = gpu_name[:max_gpu_len-3] + "..."
+        # Обрезаем длинные имена GPU чтобы не ломать рамку
+        max_len = 40
+        if len(gpu_name) > max_len:
+            gpu_name = gpu_name[:max_len-3] + "..."
 
         print(f"\n{Colors.BOLD}{Colors.CYAN}", end="")
-        print("╔" + "═" * 62 + "╗")
-        print("║" + " " * 16 + "Gonka PoW Benchmark v1.1" + " " * 21 + "║")
-        print("╠" + "═" * 62 + "╣")
-        print(f"║  GPU: {gpu_name:<50} ║")
-        print(f"║  CUDA: {cuda_version:<50} ║")
-        print(f"║  Test duration: {int(self.duration_sec // 60)} minutes{'':<31} ║")
-        print(f"║  RTarget: {self.r_target:<49} ║")
-        print("╚" + "═" * 62 + "╝")
+        print("╔" + "═" * 60 + "╗")
+        print("║" + " " * 15 + "Gonka PoW Benchmark v1.1" + " " * 19 + "║")
+        print("╠" + "═" * 60 + "╣")
+        print(f"║  GPU: {gpu_name:<48}║")
+        print(f"║  CUDA: {cuda_version:<49}║")
+        print(f"║  Test duration: {int(self.duration_sec // 60)} minutes{'':<28}║")
+        print(f"║  RTarget: {self.r_target:<49}║")
+        print("╚" + "═" * 60 + "╝")
         print(f"{Colors.END}")
 
     def print_results(self):
@@ -198,19 +198,19 @@ class GonkaBenchmark:
         poc_weight = int(self.total_valid * WEIGHT_SCALE_FACTOR)
 
         print(f"\n{Colors.BOLD}{Colors.GREEN}", end="")
-        print("╔" + "═" * 62 + "╗")
-        print("║" + " " * 21 + "BENCHMARK RESULTS" + " " * 24 + "║")
-        print("╠" + "═" * 62 + "╣")
-        print(f"║  {Colors.CYAN}valid_nonces:{Colors.END}    {self.total_valid:<43} ║")
-        print(f"║  {Colors.GREEN}poc_weight:{Colors.END}      {poc_weight:<43} ║")
-        print("╠" + "═" * 62 + "╣")
-        print(f"║  {Colors.CYAN}valid/min:{Colors.END}       {valid_per_min:<43.2f} ║")
-        print(f"║  {Colors.CYAN}raw/min:{Colors.END}         {raw_per_min:<43.2f} ║")
-        print(f"║  {Colors.CYAN}1 in N:{Colors.END}          {one_in_n:<43.0f} ║")
-        print("╠" + "═" * 62 + "╣")
-        print(f"║  {Colors.CYAN}total_checked:{Colors.END}   {self.total_checked:<43} ║")
-        print(f"║  {Colors.CYAN}duration_min:{Colors.END}    {duration_min:<43.2f} ║")
-        print("╚" + "═" * 62 + "╝")
+        print("╔" + "═" * 60 + "╗")
+        print("║" + " " * 20 + "BENCHMARK RESULTS" + " " * 23 + "║")
+        print("╠" + "═" * 60 + "╣")
+        print(f"║  {Colors.CYAN}valid_nonces:{Colors.END}    {self.total_valid:<41}║")
+        print(f"║  {Colors.GREEN}poc_weight:{Colors.END}      {poc_weight:<41}║")
+        print("╠" + "═" * 60 + "╣")
+        print(f"║  {Colors.CYAN}valid/min:{Colors.END}       {valid_per_min:<41.2f}║")
+        print(f"║  {Colors.CYAN}raw/min:{Colors.END}         {raw_per_min:<41.2f}║")
+        print(f"║  {Colors.CYAN}1 in N:{Colors.END}          {one_in_n:<41.0f}║")
+        print("╠" + "═" * 60 + "╣")
+        print(f"║  {Colors.CYAN}total_checked:{Colors.END}   {self.total_checked:<41}║")
+        print(f"║  {Colors.CYAN}duration_min:{Colors.END}    {duration_min:<41.2f}║")
+        print("╚" + "═" * 60 + "╝")
         print(f"{Colors.END}")
 
         print(f"{Colors.YELLOW}Формула:{Colors.END} poc_weight = valid_nonces × {WEIGHT_SCALE_FACTOR}")
