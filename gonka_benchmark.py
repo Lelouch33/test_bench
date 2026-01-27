@@ -18,10 +18,10 @@ Gonka PoW Benchmark
 import os
 import sys
 import time
+from datetime import datetime
 import json
 import argparse
 import hashlib
-from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple
 
@@ -299,34 +299,63 @@ class GonkaBenchmark:
 
         print()
 
-        # Функция для получения GPU статистики
+        # Функция для получения GPU статистики через pynvml
         def get_gpu_stats():
             if not torch.cuda.is_available():
                 return None
             try:
-                import subprocess
-                result = subprocess.run([
-                    'nvidia-smi',
-                    '--query-gpu=memory.used,memory.total,utilization.gpu,power.draw',
-                    '--format=csv,noheader,nounits',
-                ], capture_output=True, text=True, timeout=2)
-                if result.returncode == 0:
-                    values = result.stdout.strip().split(', ')
-                    if len(values) >= 4:
-                        mem_used = int(values[0])
-                        mem_total = int(values[1])
-                        gpu_util = int(values[2])
-                        power = float(values[3])
-                        mem_percent = (mem_used / mem_total) * 100
-                        return {
-                            'mem_used_mb': mem_used // 1024,
-                            'mem_total_mb': mem_total // 1024,
-                            'mem_percent': mem_percent,
-                            'gpu_util': gpu_util,
-                            'power_w': power
-                        }
-            except:
-                pass
+                import pynvml
+                pynvml.nvmlInit()
+                handle = pynvml.nvmlDeviceGetHandleByIndex(self.device.index if hasattr(self.device, 'index') else 0)
+
+                # Память в байтах
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                mem_used_mb = mem_info.used // (1024 * 1024)
+                mem_total_mb = mem_info.total // (1024 * 1024)
+                mem_percent = (mem_info.used / mem_info.total) * 100
+
+                # GPU утилизация (мгновенное значение)
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                gpu_util = util.gpu
+
+                # Потребление энергии (мВт -> Вт)
+                power = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000
+
+                pynvml.nvmlShutdown()
+
+                return {
+                    'mem_used_mb': mem_used_mb // 1024,  # GB
+                    'mem_total_mb': mem_total_mb // 1024,  # GB
+                    'mem_percent': mem_percent,
+                    'gpu_util': gpu_util,
+                    'power_w': power
+                }
+            except Exception as e:
+                # Fallback на nvidia-smi если pynvml не сработал
+                try:
+                    import subprocess
+                    result = subprocess.run([
+                        'nvidia-smi',
+                        '--query-gpu=memory.used,memory.total,utilization.gpu,power.draw',
+                        '--format=csv,noheader,nounits',
+                    ], capture_output=True, text=True, timeout=2)
+                    if result.returncode == 0:
+                        values = result.stdout.strip().split(', ')
+                        if len(values) >= 4:
+                            mem_used = int(values[0])
+                            mem_total = int(values[1])
+                            gpu_util = int(values[2])
+                            power = float(values[3])
+                            mem_percent = (mem_used / mem_total) * 100
+                            return {
+                                'mem_used_mb': mem_used // 1024,
+                                'mem_total_mb': mem_total // 1024,
+                                'mem_percent': mem_percent,
+                                'gpu_util': gpu_util,
+                                'power_w': power
+                            }
+                except:
+                    pass
             return None
 
         try:
@@ -379,7 +408,7 @@ class GonkaBenchmark:
                         print(f"[{int(elapsed//60):02d}:{int(elapsed%60):02d}] "
                               f"valid: {self.total_valid} | poc_weight: {poc_w} | "
                               f"1 in {one_in:.0f} | valid/min: {valid_rate:.1f} | raw/min: {raw_rate:.1f}")
-                        print(f"                     {gpu_line}")
+                        print(f"                     {gpu_line} | {datetime.now().strftime('%H:%M:%S')}")
 
                         last_report_time = current_time
 
