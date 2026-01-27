@@ -588,7 +588,7 @@ class GonkaBenchmark:
                     for i in range(self.num_gpus):
                         wv = worker_stats[i]['total_valid']
                         wc = worker_stats[i]['total_checked']
-                        wel = worker_stats[i].get('elapsed', elapsed)
+                        wel = worker_stats[i].get('elapsed', worker_elapsed)
                         wel_min = wel / 60 if wel > 0 else 0
 
                         w_valid_rate = wv / wel_min if wel_min > 0 else 0
