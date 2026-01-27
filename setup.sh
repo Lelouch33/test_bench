@@ -192,7 +192,13 @@ uv pip install \
     scipy \
     accelerate \
     transformers \
-    tqdm
+    tqdm \
+    fire \
+    toml \
+    nvidia-ml-py \
+    tiktoken \
+    aiohttp \
+    httpx
 
 log_success "Зависимости установлены"
 

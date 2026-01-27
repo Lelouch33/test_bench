@@ -184,7 +184,7 @@ if [[ ! -d "$VENV_DIR" ]]; then
     
     # Остальные зависимости
     log_info "Установка зависимостей..."
-    uv pip install numpy scipy accelerate transformers tqdm
+    uv pip install numpy scipy accelerate transformers tqdm fire toml nvidia-ml-py tiktoken aiohttp httpx
     
     log_success "Зависимости установлены"
 else
