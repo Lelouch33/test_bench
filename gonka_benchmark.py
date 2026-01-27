@@ -284,7 +284,7 @@ class GonkaBenchmark:
             return None
 
         # Определяем batch_size через gonka autobs_v2.py
-        gpu_group = GpuGroup(devices=[self.device.index if torch.cuda.is_available() else 0], primary=0)
+        gpu_group = GpuGroup(devices=[self.device.index if torch.cuda.is_available() else 0])
         self.batch_size = get_batch_size_for_gpu_group(gpu_group, params)
         log_info(f"batch_size из gonka autobs_v2: {self.batch_size}")
 
