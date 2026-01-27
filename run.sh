@@ -10,7 +10,7 @@
 # 5. Запускает бенчмарк
 #
 # Использование:
-#   bash run.sh              # 6 минут (по умолчанию)
+#   bash run.sh              # 5 минут (по умолчанию)
 #   bash run.sh --duration 3 # 3 минуты
 #   bash run.sh --help       # Справка
 # ═══════════════════════════════════════════════════════════════════════════
@@ -49,7 +49,7 @@ log_step()    { echo -e "\n${CYAN}${BOLD}═══ $1 ═══${NC}\n"; }
 # ═══════════════════════════════════════════════════════════════════════════
 echo ""
 echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}${BOLD}║            Gonka PoW Benchmark - All-in-One                      ║${NC}"
+echo -e "${CYAN}${BOLD}║            Gonka PoW Benchmark - All-in-One v1.2                 ║${NC}"
 echo -e "${CYAN}${BOLD}║                                                                  ║${NC}"
 echo -e "${CYAN}${BOLD}║  Формула: poc_weight = valid_nonces × 2.5                        ║${NC}"
 echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════════╝${NC}"
@@ -190,6 +190,12 @@ if [[ ! -d "$VENV_DIR" ]]; then
 else
     log_success "Виртуальное окружение уже существует"
     source "$VENV_DIR/bin/activate"
+    
+    # Проверяем наличие httpx
+    if ! python3 -c "import httpx" 2>/dev/null; then
+        log_info "Установка httpx..."
+        uv pip install httpx
+    fi
 fi
 
 # Проверка PyTorch

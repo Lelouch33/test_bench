@@ -23,7 +23,7 @@ log_error()   { echo -e "${RED}[✗]${NC} $1"; }
 
 echo ""
 echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║          Gonka PoW Benchmark - Setup                             ║${NC}"
+echo -e "${CYAN}║          Gonka PoW Benchmark - Setup v1.2                        ║${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -248,6 +248,7 @@ echo -e "Python:         $($PYTHON_CMD --version)"
 echo -e "uv:             $(uv --version)"
 echo -e "PyTorch:        $($PYTHON_CMD -c 'import torch; print(torch.__version__)')"
 echo -e "CUDA available: $($PYTHON_CMD -c 'import torch; print(torch.cuda.is_available())')"
+echo -e "httpx:          $($PYTHON_CMD -c 'import httpx; print(httpx.__version__)')"
 
 if $PYTHON_CMD -c 'import torch; exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
     echo -e "CUDA version:   $($PYTHON_CMD -c 'import torch; print(torch.version.cuda)')"
@@ -264,6 +265,9 @@ echo -e "${GREEN}║    source .venv/bin/activate                               
 echo -e "${GREEN}║                                                                  ║${NC}"
 echo -e "${GREEN}║  Запуск бенчмарка:                                               ║${NC}"
 echo -e "${GREEN}║    python3 gonka_benchmark.py                                    ║${NC}"
+echo -e "${GREEN}║                                                                  ║${NC}"
+echo -e "${GREEN}║  Получить параметры из сети:                                     ║${NC}"
+echo -e "${GREEN}║    python3 fetch_poc_duration.py --params                        ║${NC}"
 echo -e "${GREEN}║                                                                  ║${NC}"
 echo -e "${GREEN}║  Или с кастомным временем:                                       ║${NC}"
 echo -e "${GREEN}║    python3 gonka_benchmark.py --duration 3                       ║${NC}"

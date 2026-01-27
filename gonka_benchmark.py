@@ -24,7 +24,7 @@ import json
 import argparse
 import hashlib
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 
 # Настройка окружения для cudnn
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -44,23 +44,39 @@ DEFAULT_GONKA_PATH = "./gonka"
 # var WeightScaleFactor = mathsdk.LegacyNewDecWithPrec(25, 1) // 2.5
 WEIGHT_SCALE_FACTOR = 2.5
 
+# Fallback RTarget если не удалось получить из сети
+DEFAULT_R_TARGET = 1.398077
+
 # PoC параметры v2 (из inference-chain/x/inference/types/params.go DefaultPoCModelParams)
-POC_PARAMS = {
+# Используются как fallback если не удалось получить из сети
+DEFAULT_POC_PARAMS = {
     "dim": 1792,
     "n_layers": 64,
     "n_heads": 64,
     "n_kv_heads": 64,
     "vocab_size": 8196,
     "ffn_dim_multiplier": 10.0,
-    "multiple_of": 4 * 2048,
+    "multiple_of": 8192,  # Явно указываем 8192 для читаемости
     "norm_eps": 1e-5,
     "rope_theta": 10000.0,
     "use_scaled_rope": False,
     "seq_len": 256,
 }
 
-# RTarget из chain params (inference-chain/x/inference/types/params.go DefaultPoCModelParams)
-R_TARGET = 1.398077
+# Genesis ноды для получения параметров
+GENESIS_NODES = [
+    "http://node2.gonka.ai:8000",
+    "http://node1.gonka.ai:8000",
+    "http://node3.gonka.ai:8000",
+    "https://node4.gonka.ai",
+    "http://47.236.26.199:8000",
+    "http://47.236.19.22:18000",
+    "http://185.216.21.98:8000",
+    "http://36.189.234.197:18026",
+    "http://36.189.234.237:17241",
+    "http://gonka.spv.re:8000",
+]
+
 
 # ============ ЦВЕТА ДЛЯ ВЫВОДА ============
 class Colors:
@@ -88,6 +104,89 @@ def log_warning(msg: str):
 
 def log_error(msg: str):
     print(f"{Colors.RED}[✗]{Colors.END} {msg}")
+
+
+# ============ ПОЛУЧЕНИЕ ПАРАМЕТРОВ ИЗ СЕТИ ============
+def fetch_poc_params_from_network(timeout: float = 5.0) -> Optional[Dict[str, Any]]:
+    """
+    Получает актуальные PoC параметры из сети Gonka.
+    Пробует все genesis ноды пока не получит ответ.
+    
+    Returns:
+        Dict с параметрами или None если все ноды недоступны
+    """
+    try:
+        import httpx
+    except ImportError:
+        log_warning("httpx не установлен, используем fallback параметры")
+        return None
+    
+    for node_url in GENESIS_NODES:
+        try:
+            # Эндпоинт для получения параметров inference модуля
+            url = f"{node_url}/chain-api/productscience/inference/inference/params"
+            
+            with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+                response = client.get(url)
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # Извлекаем PoC параметры
+                    params = data.get("params", {})
+                    poc_params = params.get("poc_model_params", {})
+                    
+                    if not poc_params:
+                        continue
+                    
+                    result = {
+                        "r_target": float(poc_params.get("r_target", DEFAULT_R_TARGET)),
+                        "dim": int(poc_params.get("dim", DEFAULT_POC_PARAMS["dim"])),
+                        "n_layers": int(poc_params.get("n_layers", DEFAULT_POC_PARAMS["n_layers"])),
+                        "n_heads": int(poc_params.get("n_heads", DEFAULT_POC_PARAMS["n_heads"])),
+                        "n_kv_heads": int(poc_params.get("n_kv_heads", DEFAULT_POC_PARAMS["n_kv_heads"])),
+                        "vocab_size": int(poc_params.get("vocab_size", DEFAULT_POC_PARAMS["vocab_size"])),
+                        "ffn_dim_multiplier": float(poc_params.get("ffn_dim_multiplier", DEFAULT_POC_PARAMS["ffn_dim_multiplier"])),
+                        "multiple_of": int(poc_params.get("multiple_of", DEFAULT_POC_PARAMS["multiple_of"])),
+                        "norm_eps": float(poc_params.get("norm_eps", DEFAULT_POC_PARAMS["norm_eps"])),
+                        "rope_theta": float(poc_params.get("rope_theta", DEFAULT_POC_PARAMS["rope_theta"])),
+                        "use_scaled_rope": bool(poc_params.get("use_scaled_rope", DEFAULT_POC_PARAMS["use_scaled_rope"])),
+                        "seq_len": int(poc_params.get("seq_len", DEFAULT_POC_PARAMS["seq_len"])),
+                        "source_node": node_url,
+                    }
+                    
+                    log_success(f"Параметры получены из сети: {node_url}")
+                    log_info(f"  r_target: {result['r_target']}")
+                    
+                    return result
+                    
+        except Exception as e:
+            # Тихо пробуем следующую ноду
+            continue
+    
+    log_warning("Не удалось получить параметры из сети, используем fallback")
+    return None
+
+
+def get_poc_params(use_network: bool = True) -> Tuple[Dict[str, Any], float]:
+    """
+    Получает PoC параметры (из сети или fallback).
+    
+    Args:
+        use_network: Пытаться ли получить из сети
+        
+    Returns:
+        Tuple (poc_params dict без r_target, r_target float)
+    """
+    if use_network:
+        network_params = fetch_poc_params_from_network()
+        if network_params:
+            r_target = network_params.pop("r_target")
+            network_params.pop("source_node", None)
+            return network_params, r_target
+    
+    # Fallback
+    log_info(f"Используем fallback параметры (r_target={DEFAULT_R_TARGET})")
+    return DEFAULT_POC_PARAMS.copy(), DEFAULT_R_TARGET
 
 
 # ============ ДОБАВЛЕНИЕ ПУТЕЙ К GONKA ============
@@ -308,9 +407,22 @@ class GonkaBenchmark:
         device: str = "cuda:0",
         duration_min: float = DEFAULT_DURATION_MIN,
         batch_size: int = None,
-        r_target: float = R_TARGET,
+        r_target: float = None,
         num_gpus: int = None,
+        poc_params: Dict[str, Any] = None,
+        use_network_params: bool = True,
     ):
+        # Получаем параметры из сети или используем fallback
+        if poc_params is None or r_target is None:
+            network_poc_params, network_r_target = get_poc_params(use_network=use_network_params)
+            if poc_params is None:
+                poc_params = network_poc_params
+            if r_target is None:
+                r_target = network_r_target
+        
+        self.poc_params = poc_params
+        self.r_target = r_target
+        
         # Поддержка нескольких GPU
         if num_gpus is None:
             num_gpus = torch.cuda.device_count()
@@ -321,7 +433,6 @@ class GonkaBenchmark:
 
         self.duration_sec = duration_min * 60
         self.batch_size = batch_size
-        self.r_target = r_target
 
         # Параметры для теста
         self.block_hash = hashlib.sha256(b"gonka_benchmark").hexdigest()
@@ -358,7 +469,7 @@ class GonkaBenchmark:
         print()  # Отступ перед рамкой
         print(f"{Colors.BOLD}{Colors.CYAN}", end="")
         print("╔" + "═" * 60 + "╗")
-        print("║" + " " * 15 + "Gonka PoW Benchmark v1.1" + " " * 21 + "║")
+        print("║" + " " * 15 + "Gonka PoW Benchmark v1.2" + " " * 21 + "║")
         print("╠" + "═" * 60 + "╣")
 
         # Ручное выравнивание (+3 пробела)
@@ -457,7 +568,7 @@ class GonkaBenchmark:
             return None
 
         # Создаём параметры модели
-        params = Params(**POC_PARAMS)
+        params = Params(**self.poc_params)
         params_str = f"Params(dim={params.dim}, n_layers={params.n_layers}, n_heads={params.n_heads}, n_kv_heads={params.n_kv_heads}, vocab_size={params.vocab_size}, ffn_dim_multiplier={params.ffn_dim_multiplier}, multiple_of={params.multiple_of}, norm_eps={params.norm_eps}, rope_theta={params.rope_theta}, use_scaled_rope={params.use_scaled_rope}, seq_len={params.seq_len})"
         log_info(f"params={params_str}")
 
@@ -661,8 +772,8 @@ class GonkaBenchmark:
             "torch_version": torch.__version__,
             "batch_size": self.batch_size,
             "device": str(self.device),
-            "poc_params": POC_PARAMS,
-            "r_target": R_TARGET,
+            "poc_params": self.poc_params,
+            "r_target": self.r_target,
             "weight_scale_factor": WEIGHT_SCALE_FACTOR,
         })
 
@@ -700,6 +811,7 @@ def main():
   python3 gonka_benchmark.py --duration 3 # 3 минуты
   python3 gonka_benchmark.py --device cuda:1
   python3 gonka_benchmark.py --batch-size 256
+  python3 gonka_benchmark.py --offline    # Без запроса параметров из сети
 
 Формула: poc_weight = valid_nonces × 2.5
         """
@@ -758,6 +870,19 @@ def main():
         action="store_true",
         help="Сохранять все найденные valid nonce для дедупликации"
     )
+    
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Не запрашивать параметры из сети (использовать fallback)"
+    )
+    
+    parser.add_argument(
+        "--r-target",
+        type=float,
+        default=None,
+        help=f"Переопределить RTarget (по умолчанию: из сети или {DEFAULT_R_TARGET})"
+    )
 
     args = parser.parse_args()
 
@@ -776,6 +901,8 @@ def main():
         duration_min=args.duration,
         batch_size=args.batch_size,
         num_gpus=args.num_gpus,
+        r_target=args.r_target,
+        use_network_params=not args.offline,
     )
     benchmark.save_nonces = args.save_nonces
 

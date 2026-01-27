@@ -44,7 +44,8 @@ def merge_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
             all_nonces.update(r['all_valid_nonces'])
         # Иначе пробуем загрузить из CSV файла
         else:
-            nonce_file = Path(r['_source_file']).parent / Path(r['_source_file']).stem.replace("_nonces", "") + "_nonces.csv"
+            source_file = Path(r['_source_file'])
+            nonce_file = source_file.parent / (source_file.stem.replace("_nonces", "") + "_nonces.csv")
             if nonce_file.exists():
                 import csv
                 with open(nonce_file, 'r') as f:
