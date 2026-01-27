@@ -2,6 +2,15 @@
 
 Автономный бенчмарк для тестирования производительности GPU для Proof-of-Compute.
 
+## Быстрый старт
+
+```bash
+# Клонирование и запуск (всё автоматически)
+git clone https://github.com/Lelouch33/test_bench.git
+cd test_bench
+bash run.sh
+```
+
 ## Формула расчёта веса
 
 ```
