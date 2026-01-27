@@ -242,10 +242,14 @@ if [[ ! -f "$BENCHMARK_SCRIPT" ]]; then
 fi
 
 # Запускаем бенчмарк с переданными аргументами
-log_info "Запуск: python3 gonka_benchmark.py ${BENCHMARK_ARGS[*]:-}"
+log_info "Запуск: python3 gonka_benchmark.py ${BENCHMARK_ARGS[*]}"
 echo ""
 
-python3 "$BENCHMARK_SCRIPT" --gonka-path "$GONKA_PATH" --output "$RESULTS_DIR" "${BENCHMARK_ARGS[@]:-}"
+if [[ ${#BENCHMARK_ARGS[@]} -gt 0 ]]; then
+    python3 "$BENCHMARK_SCRIPT" --gonka-path "$GONKA_PATH" --output "$RESULTS_DIR" "${BENCHMARK_ARGS[@]}"
+else
+    python3 "$BENCHMARK_SCRIPT" --gonka-path "$GONKA_PATH" --output "$RESULTS_DIR"
+fi
 
 exit_code=$?
 
