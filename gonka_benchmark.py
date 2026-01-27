@@ -277,10 +277,8 @@ class WorkerProcess(mp.Process):
                 self.total_checked += len(nonces)
                 self.total_valid += len(valid_batch.nonces)
 
-                # Получаем GPU статистику (не каждый раз, каждую ~10 итерацию)
-                gpu_stats = {}
-                if self.total_valid % 10 == 0:
-                    gpu_stats = self._get_gpu_stats()
+                # Получаем GPU статистику каждый раз
+                gpu_stats = self._get_gpu_stats()
 
                 # Отправляем результат в очередь
                 elapsed = time.time() - start_time
@@ -463,10 +461,14 @@ class GonkaBenchmark:
         params_str = f"Params(dim={params.dim}, n_layers={params.n_layers}, n_heads={params.n_heads}, n_kv_heads={params.n_kv_heads}, vocab_size={params.vocab_size}, ffn_dim_multiplier={params.ffn_dim_multiplier}, multiple_of={params.multiple_of}, norm_eps={params.norm_eps}, rope_theta={params.rope_theta}, use_scaled_rope={params.use_scaled_rope}, seq_len={params.seq_len})"
         log_info(f"params={params_str}")
 
-        # Определяем batch_size
-        gpu_group = GpuGroup(devices=self.device_ids)
-        self.batch_size = get_batch_size_for_gpu_group(gpu_group, params)
-        log_info(f"Using batch size: {self.batch_size} for {self.num_gpus}xGPU group {self.device_ids}")
+        # Определяем batch_size для ОДНОГО GPU (так как каждый worker загружает свою модель)
+        # При multiprocessing каждый worker имеет свою копию модели на своём GPU
+        single_gpu_group = GpuGroup(devices=[self.device_ids[0]])  # Первый GPU
+        single_gpu_batch = get_batch_size_for_gpu_group(single_gpu_group, params)
+
+        # Для multi-GPU каждый worker использует этот batch size
+        self.batch_size = single_gpu_batch
+        log_info(f"Using batch size: {self.batch_size} per GPU (total: {self.batch_size * self.num_gpus} for {self.num_gpus}xGPU)")
 
         log_info(f"Запуск бенчмарка на {self.duration_sec / 60:.1f} минут с {self.num_gpus}xGPU...")
         print()
