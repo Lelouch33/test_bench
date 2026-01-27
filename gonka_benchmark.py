@@ -125,11 +125,12 @@ def import_gonka_modules():
         from pow.compute.compute import Compute
         from pow.models.utils import Params
         from pow.random import get_target
-        return Compute, Params, get_target
+        from pow.compute.autobs_v2 import get_batch_size_for_gpu_group, GpuGroup
+        return Compute, Params, get_target, get_batch_size_for_gpu_group, GpuGroup
     except ImportError as e:
         log_error(f"Не удалось импортировать модули gonka: {e}")
         log_info("Убедитесь что скачали код gonka с нужными модулями")
-        return None, None, None
+        return None, None, None, None, None
 
 
 # ============ КЛАСС БЕНЧМАРКА ============
@@ -249,7 +250,7 @@ class GonkaBenchmark:
         self.print_header()
 
         # Импорт модулей gonka
-        Compute, Params, get_target = import_gonka_modules()
+        Compute, Params, get_target, get_batch_size_for_gpu_group, GpuGroup = import_gonka_modules()
         if Compute is None:
             return None
 
@@ -282,9 +283,10 @@ class GonkaBenchmark:
             traceback.print_exc()
             return None
 
-        # Получаем batch_size из gonka (autobs_v2.py)
-        self.batch_size = self.compute.batch_size
-        log_info(f"batch_size из gonka autobs: {self.batch_size}")
+        # Определяем batch_size через gonka autobs_v2.py
+        gpu_group = GpuGroup(devices=[self.device.index if torch.cuda.is_available() else 0], primary=0)
+        self.batch_size = get_batch_size_for_gpu_group(gpu_group, params)
+        log_info(f"batch_size из gonka autobs_v2: {self.batch_size}")
 
         # Запуск бенчмарка
         log_info(f"Запуск бенчмарка на {self.duration_sec / 60:.1f} минут...")
