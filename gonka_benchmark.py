@@ -171,20 +171,29 @@ class GonkaBenchmark:
         gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
         cuda_version = torch.version.cuda or "N/A"
 
-        # Обрезаем длинные имена GPU чтобы не ломать рамку
-        max_len = 38
-        if len(gpu_name) > max_len:
-            gpu_name = gpu_name[:max_len-3] + "..."
+        # Обрезаем длинные имена GPU
+        if len(gpu_name) > 38:
+            gpu_name = gpu_name[:35] + "..."
 
-        # Ширина рамки = 60, расчёт: ║(1) + префикс + поле(выравн) + ║(1) = 60
         print(f"\n{Colors.BOLD}{Colors.CYAN}", end="")
         print("╔" + "═" * 60 + "╗")
         print("║" + " " * 15 + "Gonka PoW Benchmark v1.1" + " " * 19 + "║")
         print("╠" + "═" * 60 + "╣")
-        print(f"║  GPU: {gpu_name:<51}║")           # 1+2+5+51+1 = 60
-        print(f"║  CUDA: {cuda_version:<50}║")      # 1+2+6+50+1 = 60
-        print(f"║  Test duration: {int(self.duration_sec // 60)} minutes{'':<31}║")  # 1+2+16+1+9+31 = 60
-        print(f"║  RTarget: {self.r_target:<46}║")  # 1+2+10+46+1 = 60
+
+        # Каждая строка = 60 символов (╔ + 58 внутри + ╗)
+        # Формат: "║  PREFIX: CONTENT" + пробелы до 58 + "║"
+        gpu_line = "║  GPU: " + gpu_name
+        print(gpu_line + " " * (58 - len(gpu_line)) + "║")
+
+        cuda_line = "║  CUDA: " + str(cuda_version)
+        print(cuda_line + " " * (58 - len(cuda_line)) + "║")
+
+        dur_line = f"║  Test duration: {int(self.duration_sec // 60)} minutes"
+        print(dur_line + " " * (58 - len(dur_line)) + "║")
+
+        rtarget_line = f"║  RTarget: {self.r_target}"
+        print(rtarget_line + " " * (58 - len(rtarget_line)) + "║")
+
         print("╚" + "═" * 60 + "╝")
         print(f"{Colors.END}")
 
