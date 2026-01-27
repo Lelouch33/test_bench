@@ -232,8 +232,12 @@ class WorkerProcess(mp.Process):
 
     def run(self):
         """Основной цикл worker'а"""
+        # ВАЖНО: подавляем tqdm ДО любых импортов
+        os.environ['TQDM_DISABLE'] = '1'
+        os.environ['PYTHONUNBUFFERED'] = '1'
+
         try:
-            # Подавляем логи модели (прогресс-бары)
+            # Подавляем логи модели
             self._suppress_model_logs()
 
             # Импортируем внутри процесса
@@ -283,10 +287,12 @@ class WorkerProcess(mp.Process):
                     gpu_stats = self._get_gpu_stats()
 
                 # Отправляем результат в очередь
+                elapsed = time.time() - start_time
                 self.result_queue.put({
                     'worker_id': self.worker_id,
                     'total_valid': self.total_valid,
                     'total_checked': self.total_checked,
+                    'elapsed': elapsed,
                     'gpu_stats': gpu_stats,
                 })
 
@@ -396,7 +402,6 @@ class GonkaBenchmark:
         print("╠" + "═" * 60 + "╣")
         print(f"║  {Colors.CYAN}valid/min:{Colors.END}       {valid_per_min:<41.2f}║")
         print(f"║  {Colors.CYAN}raw/min:{Colors.END}         {raw_per_min:<41.2f}║")
-        print(f"║  {Colors.CYAN}1 in N:{Colors.END}          {one_in_n:<41.0f}║")
         print("╠" + "═" * 60 + "╣")
         print(f"║  {Colors.CYAN}total_checked:{Colors.END}   {self.total_checked:<41}║")
         print(f"║  {Colors.CYAN}duration_min:{Colors.END}    {duration_min:<41.2f}║")
@@ -518,6 +523,7 @@ class GonkaBenchmark:
                     worker_id = result['worker_id']
                     worker_stats[worker_id]['total_valid'] = result['total_valid']
                     worker_stats[worker_id]['total_checked'] = result['total_checked']
+                    worker_stats[worker_id]['elapsed'] = result.get('elapsed', 0)
                     # Обновляем GPU статистику если она есть
                     if result.get('gpu_stats'):
                         worker_stats[worker_id]['gpu_stats'] = result['gpu_stats']
@@ -536,23 +542,30 @@ class GonkaBenchmark:
 
                     valid_rate = total_valid / elapsed_min if elapsed_min > 0 else 0
                     raw_rate = total_checked / elapsed_min if elapsed_min > 0 else 0
-                    one_in = total_checked / total_valid if total_valid > 0 else 0
                     poc_w = int(total_valid * WEIGHT_SCALE_FACTOR)
 
                     print(f"[{int(elapsed//60):02d}:{int(elapsed%60):02d}] "
                           f"valid: {total_valid} | poc_weight: {poc_w} | "
-                          f"1 in {one_in:.0f} | valid/min: {valid_rate:.1f} | raw/min: {raw_rate:.1f}")
+                          f"valid/min: {valid_rate:.1f} | raw/min: {raw_rate:.1f}")
 
                     # Показываем статистику по каждому worker
                     for i in range(self.num_gpus):
                         wv = worker_stats[i]['total_valid']
+                        wc = worker_stats[i]['total_checked']
+                        wel = worker_stats[i].get('elapsed', elapsed)
+                        wel_min = wel / 60 if wel > 0 else 0
+
+                        w_valid_rate = wv / wel_min if wel_min > 0 else 0
+                        w_raw_rate = wc / wel_min if wel_min > 0 else 0
+                        w_poc = int(wv * WEIGHT_SCALE_FACTOR)
+
                         gs = worker_stats[i].get('gpu_stats', {})
-                        # gpu_stats - это {device_id: {vram_percent, gpu_util, power_watts}}
                         if gs and self.device_ids[i] in gs:
                             g = gs[self.device_ids[i]]
-                            print(f"                     W{i}:{wv} ({g['vram_percent']}% VRAM, {g['gpu_util']}% GPU, {g['power_watts']}W)")
+                            print(f"                     W{i}:{wv} ({w_valid_rate:.1f}/min {w_raw_rate:.0f}/min {w_poc}w) | "
+                                  f"{g['vram_percent']}% VRAM {g['gpu_util']}% GPU {g['power_watts']}W")
                         else:
-                            print(f"                     W{i}:{wv}")
+                            print(f"                     W{i}:{wv} ({w_valid_rate:.1f}/min {w_raw_rate:.0f}/min {w_poc}w)")
 
                     print(f"                     {datetime.now().strftime('%H:%M:%S')}")
 
