@@ -232,10 +232,6 @@ class WorkerProcess(mp.Process):
 
     def run(self):
         """Основной цикл worker'а"""
-        # ВАЖНО: подавляем tqdm ДО любых импортов
-        os.environ['TQDM_DISABLE'] = '1'
-        os.environ['PYTHONUNBUFFERED'] = '1'
-
         try:
             # Подавляем логи модели
             self._suppress_model_logs()
@@ -383,9 +379,18 @@ class GonkaBenchmark:
         print("╚" + "═" * 60 + "╝")
         print(f"{Colors.END}")
 
-    def print_results(self):
-        """Выводит финальные результаты с дедупликацией"""
-        duration_min = (time.time() - self.start_time) / 60
+    def print_results(self, worker_elapsed_min=None):
+        """Выводит финальные результаты с дедупликацией
+
+        Args:
+            worker_elapsed_min: Время работы worker (как в реальной ноде).
+                                 Если None, используется (current_time - start_time).
+        """
+        if worker_elapsed_min is None:
+            duration_min = (time.time() - self.start_time) / 60
+        else:
+            duration_min = worker_elapsed_min
+
         valid_per_min = self.total_valid / duration_min if duration_min > 0 else 0
         raw_per_min = self.total_checked / duration_min if duration_min > 0 else 0
         one_in_n = self.total_checked / self.total_valid if self.total_valid > 0 else 0
@@ -466,6 +471,13 @@ class GonkaBenchmark:
         log_info(f"Запуск бенчмарка на {self.duration_sec / 60:.1f} минут с {self.num_gpus}xGPU...")
         print()
 
+        # ВАЖНО: подавляем tqdm и логи ДО создания workers (унаследуется subprocess)
+        os.environ['TQDM_DISABLE'] = '1'
+        import logging
+        logging.getLogger('pow').setLevel(logging.WARNING)
+        logging.getLogger('pow.compute').setLevel(logging.WARNING)
+        logging.getLogger('pow.compute.model_init').setLevel(logging.WARNING)
+
         # Multiprocessing setup
         mp.set_start_method('spawn', force=True)
         result_queue = mp.Queue()
@@ -500,20 +512,42 @@ class GonkaBenchmark:
             log_info(f"Worker {i} создан для GPU {self.device_ids[i]} (nonce offset: {i})")
 
         # Запускаем всех workers
-        start_time = time.time()
         for worker in workers:
             worker.start()
 
         # Собираем результаты и показываем прогресс
         worker_stats = {i: {'total_valid': 0, 'total_checked': 0, 'gpu_stats': {}} for i in range(self.num_gpus)}
-        last_report_time = start_time
         report_interval = 30
+
+        # Ждём первый результат (модель загружена)
+        log_info("Ожидание загрузки модели...")
+
+        # Получаем первый результат от любого worker
+        first_result = result_queue.get(timeout=120)  # 2 минуты таймаут
+        if 'error' in first_result:
+            log_error(f"Worker {first_result['worker_id']}: {first_result['error']}")
+            stop_event.set()
+            return None
+
+        worker_id = first_result['worker_id']
+        worker_stats[worker_id]['total_valid'] = first_result['total_valid']
+        worker_stats[worker_id]['total_checked'] = first_result['total_checked']
+        worker_stats[worker_id]['elapsed'] = first_result.get('elapsed', 0)
+        if first_result.get('gpu_stats'):
+            worker_stats[worker_id]['gpu_stats'] = first_result['gpu_stats']
+
+        # Начинаем отсчёт времени после загрузки модели
+        start_time = time.time()
+        last_report_time = start_time
+
+        log_success(f"Модель загружена! Worker {worker_id} готов. Начинаем бенчмарк...")
+        print()
 
         try:
             while time.time() - start_time < self.duration_sec:
-                # Получаем результаты из очереди с таймаутом
+                # Получаем результаты из очереди с небольшим таймаутом
                 try:
-                    result = result_queue.get(timeout=report_interval)
+                    result = result_queue.get(timeout=1)
 
                     if 'error' in result:
                         log_error(f"Worker {result['worker_id']}: {result['error']}")
@@ -534,17 +568,19 @@ class GonkaBenchmark:
                 # Прогресс каждые report_interval секунд
                 current_time = time.time()
                 if current_time - last_report_time >= report_interval:
-                    elapsed = current_time - start_time
-                    elapsed_min = elapsed / 60
+                    # Используем worker elapsed (как в реальной ноде)
+                    worker_elapseds = [s.get('elapsed', 0) for s in worker_stats.values() if s.get('elapsed', 0) > 0]
+                    worker_elapsed = max(worker_elapseds) if worker_elapseds else (current_time - start_time)
+                    worker_elapsed_min = worker_elapsed / 60
 
                     total_valid = sum(s['total_valid'] for s in worker_stats.values())
                     total_checked = sum(s['total_checked'] for s in worker_stats.values())
 
-                    valid_rate = total_valid / elapsed_min if elapsed_min > 0 else 0
-                    raw_rate = total_checked / elapsed_min if elapsed_min > 0 else 0
+                    valid_rate = total_valid / worker_elapsed_min if worker_elapsed_min > 0 else 0
+                    raw_rate = total_checked / worker_elapsed_min if worker_elapsed_min > 0 else 0
                     poc_w = int(total_valid * WEIGHT_SCALE_FACTOR)
 
-                    print(f"[{int(elapsed//60):02d}:{int(elapsed%60):02d}] "
+                    print(f"[{int(worker_elapsed//60):02d}:{int(worker_elapsed%60):02d}] "
                           f"valid: {total_valid} | poc_weight: {poc_w} | "
                           f"valid/min: {valid_rate:.1f} | raw/min: {raw_rate:.1f}")
 
@@ -588,7 +624,11 @@ class GonkaBenchmark:
         self.total_checked = total_checked
         self.start_time = start_time
 
-        results = self.print_results()
+        # Используем worker elapsed для расчёта ставок (как в реальной ноде)
+        worker_elapseds = [s.get('elapsed', 0) for s in worker_stats.values() if s.get('elapsed', 0) > 0]
+        worker_elapsed_min = max(worker_elapseds) / 60 if worker_elapseds else None
+
+        results = self.print_results(worker_elapsed_min=worker_elapsed_min)
 
         # Собираем информацию о GPU
         gpu_info = {}
