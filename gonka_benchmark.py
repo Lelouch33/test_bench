@@ -178,7 +178,7 @@ class GonkaBenchmark:
         print()  # Отступ перед рамкой
         print(f"{Colors.BOLD}{Colors.CYAN}", end="")
         print("╔" + "═" * 60 + "╗")
-        print("║" + " " * 15 + "Gonka PoW Benchmark v1.1" + " " * 19 + "║")
+        print("║" + " " * 15 + "Gonka PoW Benchmark v1.1" + " " * 20 + "║")
         print("╠" + "═" * 60 + "╣")
 
         # Ручное выравнивание (+3 пробела)
