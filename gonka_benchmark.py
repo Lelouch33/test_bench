@@ -253,16 +253,22 @@ class GonkaBenchmark:
             gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
             log_info(f"GPU память: {gpu_memory_gb:.1f} GB")
 
-            # Эвристика: ~0.5GB на batch для PoC V2 модели
-            # Но с учётом overhead модели (~30-40GB)
-            estimated_batch = int((gpu_memory_gb - 40) * 2)
-            estimated_batch = max(32, min(estimated_batch, 512))
+            # Эвристика на основе реальных данных:
+            # H200 (140GB) → 747 batch
+            # B300 (267GB) → 1780 batch
+            if gpu_memory_gb > 120:
+                # Для больших GPU (H200, B300)
+                estimated_batch = int(gpu_memory_gb * 5.5)
+                max_batch = 2048
+            else:
+                # Для остальных GPU
+                estimated_batch = int((gpu_memory_gb - 30) * 3)
+                max_batch = 512
 
-            # Округляем до "красивых" значений
-            for nice in [64, 128, 192, 256, 320, 384, 448, 512]:
-                if estimated_batch <= nice:
-                    estimated_batch = nice
-                    break
+            estimated_batch = max(64, min(estimated_batch, max_batch))
+
+            # Округляем до кратного 64
+            estimated_batch = (estimated_batch // 64) * 64
 
             log_info(f"Расчётный batch_size: {estimated_batch}")
             return estimated_batch
@@ -525,7 +531,7 @@ def main():
             filepath = benchmark.save_results(results, args.output)
 
             # Дополнительно сохраняем уникальные nonce если включено
-            if args.save_nononces and len(benchmark.all_valid_nonces) > 0:
+            if args.save_nonces and len(benchmark.all_valid_nonces) > 0:
                 import csv
                 nonce_file = filepath.parent / filepath.name.replace(".json", "_nonces.csv")
                 unique_nonces = set(benchmark.all_valid_nonces)
