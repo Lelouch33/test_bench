@@ -18,12 +18,13 @@ Gonka PoW Benchmark
 import os
 import sys
 import time
+import multiprocessing as mp
 from datetime import datetime
 import json
 import argparse
 import hashlib
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 
 # Настройка окружения для cudnn
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -130,6 +131,124 @@ def import_gonka_modules():
         log_error(f"Не удалось импортировать модули gonka: {e}")
         log_info("Убедитесь что скачали код gonka с нужными модулями")
         return None, None, None, None, None
+
+
+# ============ NONCE ITERATOR (как в gonka) ============
+class NonceIterator:
+    """Итератор для разделения nonce между GPU (как в gonka)"""
+    def __init__(self, node_id: int, n_nodes: int, group_id: int, n_groups: int):
+        self.node_id = node_id
+        self.n_nodes = n_nodes
+        self.group_id = group_id
+        self.n_groups = n_groups
+        self._current_x = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        # Формула из gonka: offset = node_id + group_id * n_nodes
+        # step = n_groups * n_nodes
+        # value = offset + current_x * step
+        offset = self.node_id + self.group_id * self.n_nodes
+        step = self.n_groups * self.n_nodes
+        value = offset + self._current_x * step
+        self._current_x += 1
+        return value
+
+
+# ============ WORKER PROCESS (как в gonka) ============
+class WorkerProcess(mp.Process):
+    """Worker процесс для одного GPU (как в gonka)"""
+    def __init__(
+        self,
+        worker_id: int,
+        device_ids: List[int],
+        params,
+        block_hash: str,
+        block_height: int,
+        public_key: str,
+        batch_size: int,
+        r_target: float,
+        duration_sec: float,
+        nonce_iterator: NonceIterator,
+        result_queue: mp.Queue,
+        stop_event: mp.Event,
+    ):
+        super().__init__()
+        self.worker_id = worker_id
+        self.device_ids = device_ids
+        self.params = params
+        self.block_hash = block_hash
+        self.block_height = block_height
+        self.public_key = public_key
+        self.batch_size = batch_size
+        self.r_target = r_target
+        self.duration_sec = duration_sec
+        self.nonce_iterator = nonce_iterator
+        self.result_queue = result_queue
+        self.stop_event = stop_event
+
+        self.total_valid = 0
+        self.total_checked = 0
+
+    def run(self):
+        """Основной цикл worker'а"""
+        try:
+            # Импортируем внутри процесса
+            from pow.compute.compute import Compute
+
+            devices_str = [f"cuda:{i}" for i in self.device_ids]
+
+            self.compute = Compute(
+                params=self.params,
+                block_hash=self.block_hash,
+                block_height=self.block_height,
+                public_key=self.public_key,
+                r_target=self.r_target,
+                devices=devices_str,
+                node_id=0,
+            )
+
+            start_time = time.time()
+            end_time = start_time + self.duration_sec
+
+            # Предварительно получаем batch nonce
+            next_nonces = [next(self.nonce_iterator) for _ in range(self.batch_size)]
+
+            while time.time() < end_time and not self.stop_event.is_set():
+                nonces = next_nonces
+                next_nonces = [next(self.nonce_iterator) for _ in range(self.batch_size)]
+
+                # Выполняем вычисления
+                proof_batch = self.compute(
+                    nonces=nonces,
+                    public_key=self.public_key,
+                    target=self.compute.target,
+                    next_nonces=next_nonces,
+                )
+
+                # Фильтруем по r_target
+                valid_batch = proof_batch.sub_batch(self.r_target)
+
+                # Считаем статистику
+                self.total_checked += len(nonces)
+                self.total_valid += len(valid_batch.nonces)
+
+                # Отправляем результат в очередь
+                self.result_queue.put({
+                    'worker_id': self.worker_id,
+                    'total_valid': self.total_valid,
+                    'total_checked': self.total_checked,
+                })
+
+            # Очистка
+            del self.compute
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.result_queue.put({'worker_id': self.worker_id, 'error': str(e)})
 
 
 # ============ КЛАСС БЕНЧМАРКА ============
@@ -273,7 +392,7 @@ class GonkaBenchmark:
         }
 
     def run(self) -> dict:
-        """Запускает бенчмарк"""
+        """Запускает бенчмарк с multiprocessing (как в gonka)"""
         self.print_header()
 
         # Импорт модулей gonka
@@ -286,185 +405,116 @@ class GonkaBenchmark:
         params_str = f"Params(dim={params.dim}, n_layers={params.n_layers}, n_heads={params.n_heads}, n_kv_heads={params.n_kv_heads}, vocab_size={params.vocab_size}, ffn_dim_multiplier={params.ffn_dim_multiplier}, multiple_of={params.multiple_of}, norm_eps={params.norm_eps}, rope_theta={params.rope_theta}, use_scaled_rope={params.use_scaled_rope}, seq_len={params.seq_len})"
         log_info(f"params={params_str}")
 
-        # Сначала определяем batch_size (ДО загрузки модели, как в реальной ноде)
+        # Определяем batch_size
         gpu_group = GpuGroup(devices=self.device_ids)
         self.batch_size = get_batch_size_for_gpu_group(gpu_group, params)
         log_info(f"Using batch size: {self.batch_size} for {self.num_gpus}xGPU group {self.device_ids}")
 
-        try:
-            # Инициализируем Compute ПОСЛЕ определения batch_size
-            log_info("Инициализация модели...")
-            model_start = time.time()
+        log_info(f"Запуск бенчмарка на {self.duration_sec / 60:.1f} минут с {self.num_gpus}xGPU...")
+        print()
 
-            # Формируем список устройств для multi-GPU
-            devices_list = [f"cuda:{i}" for i in self.device_ids]
+        # Multiprocessing setup
+        mp.set_start_method('spawn', force=True)
+        result_queue = mp.Queue()
+        stop_event = mp.Event()
 
-            self.compute = Compute(
+        # Создаём workers (по одному на GPU)
+        workers = []
+        for i in range(self.num_gpus):
+            # Каждый worker получает свой уникальный nonce range
+            nonce_iter = NonceIterator(
+                node_id=0,
+                n_nodes=1,
+                group_id=i,
+                n_groups=self.num_gpus
+            )
+
+            worker = WorkerProcess(
+                worker_id=i,
+                device_ids=[self.device_ids[i]],  # Каждый worker использует 1 GPU
                 params=params,
                 block_hash=self.block_hash,
                 block_height=self.block_height,
                 public_key=self.public_key,
+                batch_size=self.batch_size,
                 r_target=self.r_target,
-                devices=devices_list,
-                node_id=0,
+                duration_sec=self.duration_sec,
+                nonce_iterator=nonce_iter,
+                result_queue=result_queue,
+                stop_event=stop_event,
             )
-            self.target = self.compute.target
+            workers.append(worker)
+            log_info(f"Worker {i} создан для GPU {self.device_ids[i]} (nonce offset: {i})")
 
-            model_load_time = time.time() - model_start
-            log_success(f"Модель загружена за {model_load_time:.1f}s")
+        # Запускаем всех workers
+        start_time = time.time()
+        for worker in workers:
+            worker.start()
 
-        except Exception as e:
-            log_error(f"Ошибка инициализации модели: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-        # Запуск бенчмарка
-        log_info(f"Запуск бенчмарка на {self.duration_sec / 60:.1f} минут...")
-
-        self.start_time = time.time()
-        end_time = self.start_time + self.duration_sec
-        next_nonce = 0
-        last_report_time = self.start_time
-        report_interval = 30  # Отчёт каждые 30 секунд
-
-        print()
-
-        # Функция для получения GPU статистики через pynvml (multi-GPU)
-        def get_gpu_stats():
-            if not torch.cuda.is_available():
-                return None
-            try:
-                import pynvml
-                pynvml.nvmlInit()
-
-                total_mem_used = 0
-                total_mem_total = 0
-                total_gpu_util = 0
-                total_power = 0
-
-                for device_id in self.device_ids:
-                    handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
-
-                    # Память в байтах
-                    mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                    total_mem_used += mem_info.used
-                    total_mem_total += mem_info.total
-
-                    # GPU утилизация
-                    util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                    total_gpu_util += util.gpu
-
-                    # Потребление энергии
-                    total_power += pynvml.nvmlDeviceGetPowerUsage(handle) / 1000
-
-                pynvml.nvmlShutdown()
-
-                mem_used_gb = total_mem_used // (1024 ** 3)
-                mem_total_gb = total_mem_total // (1024 ** 3)
-                mem_percent = (total_mem_used / total_mem_total) * 100
-                avg_gpu_util = total_gpu_util / len(self.device_ids)
-
-                return {
-                    'mem_used_gb': mem_used_gb,
-                    'mem_total_gb': mem_total_gb,
-                    'mem_percent': mem_percent,
-                    'gpu_util': avg_gpu_util,
-                    'power_w': total_power
-                }
-            except Exception as e:
-                # Fallback на nvidia-smi если pynvml не сработал
-                try:
-                    import subprocess
-                    result = subprocess.run([
-                        'nvidia-smi',
-                        '--query-gpu=memory.used,memory.total,utilization.gpu,power.draw',
-                        '--format=csv,noheader,nounits',
-                    ], capture_output=True, text=True, timeout=2)
-                    if result.returncode == 0:
-                        lines = result.stdout.strip().split('\n')
-                        if len(lines) >= 1:
-                            values = lines[0].split(', ')
-                            if len(values) >= 4:
-                                mem_used = int(values[0])
-                                mem_total = int(values[1])
-                                gpu_util = int(values[2])
-                                power = float(values[3])
-                                mem_percent = (mem_used / mem_total) * 100
-                                return {
-                                    'mem_used_mb': mem_used // 1024,
-                                    'mem_total_mb': mem_total // 1024,
-                                    'mem_percent': mem_percent,
-                                    'gpu_util': gpu_util,
-                                    'power_w': power
-                                }
-                except:
-                    pass
-            return None
+        # Собираем результаты и показываем прогресс
+        worker_stats = {i: {'total_valid': 0, 'total_checked': 0} for i in range(self.num_gpus)}
+        last_report_time = start_time
+        report_interval = 30
 
         try:
-            with torch.no_grad():
-                while time.time() < end_time:
-                    # Генерируем batch nonce
-                    nonces = list(range(next_nonce, next_nonce + self.batch_size))
-                    next_nonce += self.batch_size
+            while time.time() - start_time < self.duration_sec:
+                # Получаем результаты из очереди с таймаутом
+                try:
+                    result = result_queue.get(timeout=report_interval)
 
-                    # Выполняем вычисления
-                    future = self.compute(
-                        nonces=nonces,
-                        public_key=self.public_key,
-                        target=self.target,
-                    )
+                    if 'error' in result:
+                        log_error(f"Worker {result['worker_id']}: {result['error']}")
+                        stop_event.set()
+                        break
 
-                    # Получаем результат
-                    proof_batch = future.result()
+                    worker_id = result['worker_id']
+                    worker_stats[worker_id]['total_valid'] = result['total_valid']
+                    worker_stats[worker_id]['total_checked'] = result['total_checked']
 
-                    # Фильтруем по r_target
-                    valid_batch = proof_batch.sub_batch(self.r_target)
+                except:
+                    pass  # Таймаут - нормально, продолжаем
 
-                    # Обновляем статистику
-                    self.total_checked += len(proof_batch.nonces)
-                    self.total_valid += len(valid_batch.nonces)
+                # Прогресс каждые report_interval секунд
+                current_time = time.time()
+                if current_time - last_report_time >= report_interval:
+                    elapsed = current_time - start_time
+                    elapsed_min = elapsed / 60
 
-                    # Сохраняем valid nonce для дедупликации
-                    if self.save_nonces and len(valid_batch.nonces) > 0:
-                        self.all_valid_nonces.extend(valid_batch.nonces)
+                    total_valid = sum(s['total_valid'] for s in worker_stats.values())
+                    total_checked = sum(s['total_checked'] for s in worker_stats.values())
 
-                    # Прогресс-бар каждые 30 секунд с GPU статистикой
-                    current_time = time.time()
-                    if current_time - last_report_time >= report_interval:
-                        elapsed = current_time - self.start_time
-                        elapsed_min = elapsed / 60
-                        valid_rate = self.total_valid / elapsed_min if elapsed_min > 0 else 0
-                        raw_rate = self.total_checked / elapsed_min if elapsed_min > 0 else 0
-                        one_in = self.total_checked / self.total_valid if self.total_valid > 0 else 0
-                        poc_w = int(self.total_valid * WEIGHT_SCALE_FACTOR)
+                    valid_rate = total_valid / elapsed_min if elapsed_min > 0 else 0
+                    raw_rate = total_checked / elapsed_min if elapsed_min > 0 else 0
+                    one_in = total_checked / total_valid if total_valid > 0 else 0
+                    poc_w = int(total_valid * WEIGHT_SCALE_FACTOR)
 
-                        gpu_stats = get_gpu_stats()
-                        if gpu_stats:
-                            gpu_line = (f"VRAM: {gpu_stats['mem_used_mb']}GB/{gpu_stats['mem_total_mb']}GB "
-                                         f"({gpu_stats['mem_percent']:.1f}%) | "
-                                         f"GPU: {gpu_stats['gpu_util']}% | "
-                                         f"PWR: {gpu_stats['power_w']:.0f}W")
-                        else:
-                            gpu_line = "GPU: N/A"
+                    print(f"[{int(elapsed//60):02d}:{int(elapsed%60):02d}] "
+                          f"valid: {total_valid} | poc_weight: {poc_w} | "
+                          f"1 in {one_in:.0f} | valid/min: {valid_rate:.1f} | raw/min: {raw_rate:.1f}")
 
-                        print(f"[{int(elapsed//60):02d}:{int(elapsed%60):02d}] "
-                              f"valid: {self.total_valid} | poc_weight: {poc_w} | "
-                              f"1 in {one_in:.0f} | valid/min: {valid_rate:.1f} | raw/min: {raw_rate:.1f}")
-                        print(f"                     {gpu_line} | {datetime.now().strftime('%H:%M:%S')}")
+                    # Показываем статистику по каждому worker
+                    worker_str = " | ".join([f"W{i}:{worker_stats[i]['total_valid']}" for i in range(self.num_gpus)])
+                    print(f"                     {worker_str} | {datetime.now().strftime('%H:%M:%S')}")
 
-                        last_report_time = current_time
+                    last_report_time = current_time
 
         except KeyboardInterrupt:
             log_warning("\nБенчмарк прерван пользователем")
-        except Exception as e:
-            log_error(f"Ошибка во время бенчмарка: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
+
+        # Останавливаем workers
+        stop_event.set()
+        for worker in workers:
+            worker.join(timeout=5)
+            if worker.is_alive():
+                worker.terminate()
 
         # Финальные результаты
+        total_valid = sum(s['total_valid'] for s in worker_stats.values())
+        total_checked = sum(s['total_checked'] for s in worker_stats.values())
+        self.total_valid = total_valid
+        self.total_checked = total_checked
+        self.start_time = start_time
+
         results = self.print_results()
 
         # Собираем информацию о GPU
@@ -476,8 +526,8 @@ class GonkaBenchmark:
                 "total_memory_gb": round(gpu_props.total_memory / (1024**3), 2),
                 "compute_capability": f"{gpu_props.major}.{gpu_props.minor}",
                 "multi_processor_count": gpu_props.multi_processor_count,
+                "num_gpus": self.num_gpus,
             }
-            # NVIDIA Driver version
             try:
                 import subprocess
                 driver_version = subprocess.check_output(
@@ -495,7 +545,6 @@ class GonkaBenchmark:
             "cuda_version": torch.version.cuda,
             "torch_version": torch.__version__,
             "batch_size": self.batch_size,
-            "model_load_time_s": round(model_load_time, 2),
             "device": str(self.device),
             "poc_params": POC_PARAMS,
             "r_target": R_TARGET,
