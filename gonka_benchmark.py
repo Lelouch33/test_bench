@@ -180,19 +180,18 @@ class GonkaBenchmark:
         print("║" + " " * 15 + "Gonka PoW Benchmark v1.1" + " " * 19 + "║")
         print("╠" + "═" * 60 + "╣")
 
-        # Каждая строка = 60 символов (╔ + 58 внутри + ╗)
-        # Формат: "║  PREFIX: CONTENT" + пробелы до 58 + "║"
+        # Каждая строка = 60 символов
         gpu_line = "║  GPU: " + gpu_name
-        print(gpu_line + " " * (58 - len(gpu_line)) + "║")
+        print(gpu_line + " " * (62 - len(gpu_line)) + "║")
 
         cuda_line = "║  CUDA: " + str(cuda_version)
-        print(cuda_line + " " * (58 - len(cuda_line)) + "║")
+        print(cuda_line + " " * (62 - len(cuda_line)) + "║")
 
         dur_line = f"║  Test duration: {int(self.duration_sec // 60)} minutes"
-        print(dur_line + " " * (58 - len(dur_line)) + "║")
+        print(dur_line + " " * (62 - len(dur_line)) + "║")
 
         rtarget_line = f"║  RTarget: {self.r_target}"
-        print(rtarget_line + " " * (58 - len(rtarget_line)) + "║")
+        print(rtarget_line + " " * (62 - len(rtarget_line)) + "║")
 
         print("╚" + "═" * 60 + "╝")
         print(f"{Colors.END}")
