@@ -134,7 +134,7 @@ def import_gonka_modules():
 
 # ============ КЛАСС БЕНЧМАРКА ============
 class GonkaBenchmark:
-    """Бенчмарк для Gonka PoW"""
+    """Бенчмарк для Gonka PoW с поддержкой multi-GPU"""
 
     def __init__(
         self,
@@ -142,8 +142,16 @@ class GonkaBenchmark:
         duration_min: float = DEFAULT_DURATION_MIN,
         batch_size: int = None,
         r_target: float = R_TARGET,
+        num_gpus: int = None,
     ):
-        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        # Поддержка нескольких GPU
+        if num_gpus is None:
+            num_gpus = torch.cuda.device_count()
+
+        self.num_gpus = min(num_gpus, torch.cuda.device_count()) if torch.cuda.is_available() else 0
+        self.device_ids = list(range(self.num_gpus)) if self.num_gpus > 0 else [0]
+        self.device = torch.device(f"cuda:{self.device_ids[0]}") if self.num_gpus > 0 else torch.device("cpu")
+
         self.duration_sec = duration_min * 60
         self.batch_size = batch_size
         self.r_target = r_target
@@ -168,8 +176,13 @@ class GonkaBenchmark:
 
     def print_header(self):
         """Выводит заголовок бенчмарка"""
-        gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
         cuda_version = torch.version.cuda or "N/A"
+
+        # Собираем имена всех GPU
+        if self.num_gpus > 1:
+            gpu_name = f"{self.num_gpus}x {torch.cuda.get_device_name(0)}"
+        else:
+            gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
 
         # Обрезаем длинные имена GPU
         if len(gpu_name) > 38:
@@ -274,14 +287,17 @@ class GonkaBenchmark:
         log_info(f"params={params_str}")
 
         # Сначала определяем batch_size (ДО загрузки модели, как в реальной ноде)
-        gpu_group = GpuGroup(devices=[self.device.index if torch.cuda.is_available() else 0])
+        gpu_group = GpuGroup(devices=self.device_ids)
         self.batch_size = get_batch_size_for_gpu_group(gpu_group, params)
-        log_info(f"Using batch size: {self.batch_size} for GPU group [{gpu_group.primary_device}]")
+        log_info(f"Using batch size: {self.batch_size} for {self.num_gpus}xGPU group {self.device_ids}")
 
         try:
             # Инициализируем Compute ПОСЛЕ определения batch_size
             log_info("Инициализация модели...")
             model_start = time.time()
+
+            # Формируем список устройств для multi-GPU
+            devices_list = [f"cuda:{i}" for i in self.device_ids]
 
             self.compute = Compute(
                 params=params,
@@ -289,7 +305,7 @@ class GonkaBenchmark:
                 block_height=self.block_height,
                 public_key=self.public_key,
                 r_target=self.r_target,
-                devices=[str(self.device)],
+                devices=devices_list,
                 node_id=0,
             )
             self.target = self.compute.target
@@ -314,36 +330,47 @@ class GonkaBenchmark:
 
         print()
 
-        # Функция для получения GPU статистики через pynvml
+        # Функция для получения GPU статистики через pynvml (multi-GPU)
         def get_gpu_stats():
             if not torch.cuda.is_available():
                 return None
             try:
                 import pynvml
                 pynvml.nvmlInit()
-                handle = pynvml.nvmlDeviceGetHandleByIndex(self.device.index if hasattr(self.device, 'index') else 0)
 
-                # Память в байтах
-                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                mem_used_mb = mem_info.used // (1024 * 1024)
-                mem_total_mb = mem_info.total // (1024 * 1024)
-                mem_percent = (mem_info.used / mem_info.total) * 100
+                total_mem_used = 0
+                total_mem_total = 0
+                total_gpu_util = 0
+                total_power = 0
 
-                # GPU утилизация (мгновенное значение)
-                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                gpu_util = util.gpu
+                for device_id in self.device_ids:
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
 
-                # Потребление энергии (мВт -> Вт)
-                power = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000
+                    # Память в байтах
+                    mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    total_mem_used += mem_info.used
+                    total_mem_total += mem_info.total
+
+                    # GPU утилизация
+                    util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                    total_gpu_util += util.gpu
+
+                    # Потребление энергии
+                    total_power += pynvml.nvmlDeviceGetPowerUsage(handle) / 1000
 
                 pynvml.nvmlShutdown()
 
+                mem_used_gb = total_mem_used // (1024 ** 3)
+                mem_total_gb = total_mem_total // (1024 ** 3)
+                mem_percent = (total_mem_used / total_mem_total) * 100
+                avg_gpu_util = total_gpu_util / len(self.device_ids)
+
                 return {
-                    'mem_used_mb': mem_used_mb // 1024,  # GB
-                    'mem_total_mb': mem_total_mb // 1024,  # GB
+                    'mem_used_gb': mem_used_gb,
+                    'mem_total_gb': mem_total_gb,
                     'mem_percent': mem_percent,
-                    'gpu_util': gpu_util,
-                    'power_w': power
+                    'gpu_util': avg_gpu_util,
+                    'power_w': total_power
                 }
             except Exception as e:
                 # Fallback на nvidia-smi если pynvml не сработал
@@ -355,20 +382,22 @@ class GonkaBenchmark:
                         '--format=csv,noheader,nounits',
                     ], capture_output=True, text=True, timeout=2)
                     if result.returncode == 0:
-                        values = result.stdout.strip().split(', ')
-                        if len(values) >= 4:
-                            mem_used = int(values[0])
-                            mem_total = int(values[1])
-                            gpu_util = int(values[2])
-                            power = float(values[3])
-                            mem_percent = (mem_used / mem_total) * 100
-                            return {
-                                'mem_used_mb': mem_used // 1024,
-                                'mem_total_mb': mem_total // 1024,
-                                'mem_percent': mem_percent,
-                                'gpu_util': gpu_util,
-                                'power_w': power
-                            }
+                        lines = result.stdout.strip().split('\n')
+                        if len(lines) >= 1:
+                            values = lines[0].split(', ')
+                            if len(values) >= 4:
+                                mem_used = int(values[0])
+                                mem_total = int(values[1])
+                                gpu_util = int(values[2])
+                                power = float(values[3])
+                                mem_percent = (mem_used / mem_total) * 100
+                                return {
+                                    'mem_used_mb': mem_used // 1024,
+                                    'mem_total_mb': mem_total // 1024,
+                                    'mem_percent': mem_percent,
+                                    'gpu_util': gpu_util,
+                                    'power_w': power
+                                }
                 except:
                     pass
             return None
@@ -530,7 +559,14 @@ def main():
         "--device",
         type=str,
         default="cuda:0",
-        help="GPU устройство (по умолчанию: cuda:0)"
+        help="GPU устройство (по умолчанию: cuda:0, игнорируется если указан --num-gpus)"
+    )
+
+    parser.add_argument(
+        "--num-gpus", "-n",
+        type=int,
+        default=None,
+        help="Количество GPU для использования (по умолчанию: все доступные)"
     )
 
     parser.add_argument(
@@ -575,6 +611,7 @@ def main():
         device=args.device,
         duration_min=args.duration,
         batch_size=args.batch_size,
+        num_gpus=args.num_gpus,
     )
     benchmark.save_nonces = args.save_nonces
 
