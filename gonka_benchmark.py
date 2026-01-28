@@ -136,6 +136,149 @@ def parse_exp_value(obj: Any, default: float = None) -> Optional[float]:
     return default
 
 
+def parse_block_time(time_str: str) -> datetime:
+    """Парсит timestamp блока в datetime"""
+    if "." in time_str:
+        base, frac = time_str.split(".")
+        frac = frac.rstrip("Z")[:6]
+        time_str = f"{base}.{frac}+00:00"
+    else:
+        time_str = time_str.replace("Z", "+00:00")
+    
+    return datetime.fromisoformat(time_str)
+
+
+# ============ ПОЛУЧЕНИЕ ИНФОРМАЦИИ О PoC ФАЗЕ ============
+def fetch_poc_phase_info(timeout: float = 10.0) -> Optional[Dict[str, Any]]:
+    """
+    Получает информацию о текущей PoC фазе из блокчейна.
+    Возвращает блоки, timestamps и длительность.
+    """
+    try:
+        import httpx
+    except ImportError:
+        return None
+    
+    for node_url in GENESIS_NODES:
+        try:
+            with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+                # Получаем параметры эпохи
+                params_url = f"{node_url}/chain-api/productscience/inference/inference/params"
+                params_response = client.get(params_url)
+                if params_response.status_code != 200:
+                    continue
+                
+                params_data = params_response.json()
+                epoch_params = params_data.get("params", {}).get("epoch_params", {})
+                
+                epoch_length = int(epoch_params.get("epoch_length", 15391))
+                poc_stage_duration = int(epoch_params.get("poc_stage_duration", 60))
+                epoch_shift = int(epoch_params.get("epoch_shift", 16980))
+                
+                # Получаем текущий блок
+                block_url = f"{node_url}/chain-rpc/block"
+                block_response = client.get(block_url)
+                if block_response.status_code != 200:
+                    continue
+                
+                block_data = block_response.json()
+                current_block = int(block_data["result"]["block"]["header"]["height"])
+                
+                # Рассчитываем блоки PoC фазы
+                adjusted_block = current_block - epoch_shift
+                if adjusted_block < 0:
+                    adjusted_block = 0
+                
+                current_epoch = adjusted_block // epoch_length
+                epoch_start_block = epoch_shift + (current_epoch * epoch_length)
+                
+                poc_start_block = epoch_start_block
+                poc_end_block = epoch_start_block + poc_stage_duration
+                
+                # Если мы уже прошли PoC фазу текущей эпохи, показываем её
+                if current_block >= poc_end_block:
+                    pass  # Используем текущую эпоху
+                elif current_epoch > 0:
+                    # Показываем предыдущую завершённую
+                    prev_epoch_start = epoch_shift + ((current_epoch - 1) * epoch_length)
+                    poc_start_block = prev_epoch_start
+                    poc_end_block = prev_epoch_start + poc_stage_duration
+                    current_epoch -= 1
+                
+                # Получаем timestamps блоков
+                start_block_url = f"{node_url}/chain-rpc/block?height={poc_start_block}"
+                end_block_url = f"{node_url}/chain-rpc/block?height={poc_end_block}"
+                
+                start_response = client.get(start_block_url)
+                end_response = client.get(end_block_url)
+                
+                if start_response.status_code != 200 or end_response.status_code != 200:
+                    continue
+                
+                start_time_str = start_response.json()["result"]["block"]["header"]["time"]
+                end_time_str = end_response.json()["result"]["block"]["header"]["time"]
+                
+                start_time = parse_block_time(start_time_str)
+                end_time = parse_block_time(end_time_str)
+                
+                duration_seconds = (end_time - start_time).total_seconds()
+                
+                return {
+                    "current_block": current_block,
+                    "epoch_index": current_epoch,
+                    "epoch_length": epoch_length,
+                    "poc_start_block": poc_start_block,
+                    "poc_end_block": poc_end_block,
+                    "poc_blocks": poc_stage_duration,
+                    "poc_start_time": start_time.isoformat(),
+                    "poc_end_time": end_time.isoformat(),
+                    "poc_duration_seconds": duration_seconds,
+                    "poc_duration_minutes": round(duration_seconds / 60, 2),
+                    "avg_block_time_sec": round(duration_seconds / poc_stage_duration, 2),
+                    "source_node": node_url,
+                }
+                
+        except Exception:
+            continue
+    
+    return None
+
+
+def print_poc_phase_info(info: Dict[str, Any]):
+    """Выводит красивую таблицу с информацией о PoC фазе"""
+    W = 62
+    
+    print(f"{Colors.BOLD}{Colors.CYAN}╔{'═' * W}╗{Colors.END}")
+    print(f"{Colors.BOLD}{Colors.CYAN}║{'PoC Phase Information':^{W}}║{Colors.END}")
+    print(f"{Colors.BOLD}{Colors.CYAN}╠{'═' * W}╣{Colors.END}")
+    
+    print(f"{Colors.CYAN}║{Colors.END}  Current Block:       {str(info.get('current_block', 'N/A')):<{W - 25}}{Colors.CYAN}║{Colors.END}")
+    print(f"{Colors.CYAN}║{Colors.END}  Epoch Index:         {str(info.get('epoch_index', 'N/A')):<{W - 25}}{Colors.CYAN}║{Colors.END}")
+    print(f"{Colors.CYAN}║{Colors.END}  Epoch Length:        {str(info.get('epoch_length', 'N/A')):<{W - 25}}{Colors.CYAN}║{Colors.END}")
+    
+    print(f"{Colors.CYAN}╠{'═' * W}╣{Colors.END}")
+    
+    print(f"{Colors.CYAN}║{Colors.END}  PoC Start Block:     {str(info.get('poc_start_block', 'N/A')):<{W - 25}}{Colors.CYAN}║{Colors.END}")
+    print(f"{Colors.CYAN}║{Colors.END}  PoC End Block:       {str(info.get('poc_end_block', 'N/A')):<{W - 25}}{Colors.CYAN}║{Colors.END}")
+    print(f"{Colors.CYAN}║{Colors.END}  PoC Blocks:          {str(info.get('poc_blocks', 'N/A')):<{W - 25}}{Colors.CYAN}║{Colors.END}")
+    
+    print(f"{Colors.CYAN}╠{'═' * W}╣{Colors.END}")
+    
+    duration_str = f"{info['poc_duration_minutes']} min ({int(info['poc_duration_seconds'])} sec)"
+    print(f"{Colors.CYAN}║{Colors.END}  {Colors.GREEN}PoC Duration:{Colors.END}        {duration_str:<{W - 24}}{Colors.CYAN}║{Colors.END}")
+    
+    avg_str = f"{info['avg_block_time_sec']} sec"
+    print(f"{Colors.CYAN}║{Colors.END}  Avg Block Time:      {avg_str:<{W - 25}}{Colors.CYAN}║{Colors.END}")
+    print(f"{Colors.CYAN}║{Colors.END}  Start Time:          {info['poc_start_time'][:19]:<{W - 25}}{Colors.CYAN}║{Colors.END}")
+    print(f"{Colors.CYAN}║{Colors.END}  End Time:            {info['poc_end_time'][:19]:<{W - 25}}{Colors.CYAN}║{Colors.END}")
+    
+    print(f"{Colors.CYAN}╠{'═' * W}╣{Colors.END}")
+    source = info.get('source_node', 'unknown')[:W - 25]
+    print(f"{Colors.CYAN}║{Colors.END}  Source Node:         {source:<{W - 25}}{Colors.CYAN}║{Colors.END}")
+    print(f"{Colors.BOLD}{Colors.CYAN}╚{'═' * W}╝{Colors.END}")
+    print()
+
+
 # ============ ПОЛУЧЕНИЕ ПАРАМЕТРОВ ИЗ СЕТИ ============
 def fetch_poc_params_from_network(timeout: float = 5.0) -> Optional[Dict[str, Any]]:
     """
@@ -192,7 +335,31 @@ def fetch_poc_params_from_network(timeout: float = 5.0) -> Optional[Dict[str, An
                     }
                     
                     log_success(f"Параметры получены из сети: {node_url}")
-                    log_info(f"  r_target: {result['r_target']}")
+                    
+                    # Красивый вывод параметров в таблице
+                    W = 62
+                    print()
+                    print(f"{Colors.BOLD}{Colors.CYAN}╔{'═' * W}╗{Colors.END}")
+                    print(f"{Colors.BOLD}{Colors.CYAN}║{'PoC Parameters (from network)':^{W}}║{Colors.END}")
+                    print(f"{Colors.BOLD}{Colors.CYAN}╠{'═' * W}╣{Colors.END}")
+                    
+                    print(f"{Colors.CYAN}║{Colors.END}  {Colors.GREEN}Model Parameters:{Colors.END}{' ' * (W - 20)}{Colors.CYAN}║{Colors.END}")
+                    print(f"{Colors.CYAN}║{Colors.END}    r_target:            {str(result['r_target']):<{W - 26}}{Colors.CYAN}║{Colors.END}")
+                    print(f"{Colors.CYAN}║{Colors.END}    dim:                 {str(result['dim']):<{W - 26}}{Colors.CYAN}║{Colors.END}")
+                    print(f"{Colors.CYAN}║{Colors.END}    n_layers:            {str(result['n_layers']):<{W - 26}}{Colors.CYAN}║{Colors.END}")
+                    print(f"{Colors.CYAN}║{Colors.END}    n_heads:             {str(result['n_heads']):<{W - 26}}{Colors.CYAN}║{Colors.END}")
+                    print(f"{Colors.CYAN}║{Colors.END}    n_kv_heads:          {str(result['n_kv_heads']):<{W - 26}}{Colors.CYAN}║{Colors.END}")
+                    print(f"{Colors.CYAN}║{Colors.END}    vocab_size:          {str(result['vocab_size']):<{W - 26}}{Colors.CYAN}║{Colors.END}")
+                    print(f"{Colors.CYAN}║{Colors.END}    ffn_dim_multiplier:  {str(result['ffn_dim_multiplier']):<{W - 26}}{Colors.CYAN}║{Colors.END}")
+                    print(f"{Colors.CYAN}║{Colors.END}    multiple_of:         {str(result['multiple_of']):<{W - 26}}{Colors.CYAN}║{Colors.END}")
+                    print(f"{Colors.CYAN}║{Colors.END}    norm_eps:            {str(result['norm_eps']):<{W - 26}}{Colors.CYAN}║{Colors.END}")
+                    print(f"{Colors.CYAN}║{Colors.END}    rope_theta:          {str(result['rope_theta']):<{W - 26}}{Colors.CYAN}║{Colors.END}")
+                    print(f"{Colors.CYAN}║{Colors.END}    seq_len:             {str(result['seq_len']):<{W - 26}}{Colors.CYAN}║{Colors.END}")
+                    
+                    print(f"{Colors.CYAN}╠{'═' * W}╣{Colors.END}")
+                    print(f"{Colors.CYAN}║{Colors.END}  Source: {node_url:<{W - 11}}{Colors.CYAN}║{Colors.END}")
+                    print(f"{Colors.BOLD}{Colors.CYAN}╚{'═' * W}╝{Colors.END}")
+                    print()
                     
                     return result
                     
@@ -204,7 +371,7 @@ def fetch_poc_params_from_network(timeout: float = 5.0) -> Optional[Dict[str, An
     return None
 
 
-def get_poc_params(use_network: bool = True) -> Tuple[Dict[str, Any], float]:
+def get_poc_params(use_network: bool = True) -> Tuple[Dict[str, Any], float, Optional[float]]:
     """
     Получает PoC параметры (из сети или fallback).
     
@@ -212,18 +379,31 @@ def get_poc_params(use_network: bool = True) -> Tuple[Dict[str, Any], float]:
         use_network: Пытаться ли получить из сети
         
     Returns:
-        Tuple (poc_params dict без r_target, r_target float)
+        Tuple (poc_params dict без r_target, r_target float, poc_duration_minutes или None)
     """
+    poc_duration_minutes = None
+    
     if use_network:
         network_params = fetch_poc_params_from_network()
         if network_params:
             r_target = network_params.pop("r_target")
             network_params.pop("source_node", None)
-            return network_params, r_target
+            
+            # Получаем информацию о PoC фазе (длительность)
+            log_info("Получение информации о PoC фазе...")
+            poc_phase_info = fetch_poc_phase_info()
+            if poc_phase_info:
+                poc_duration_minutes = poc_phase_info.get("poc_duration_minutes")
+                log_success(f"PoC длительность: {poc_duration_minutes} минут ({int(poc_phase_info['poc_duration_seconds'])} сек)")
+                print_poc_phase_info(poc_phase_info)
+            else:
+                log_warning("Не удалось получить информацию о PoC фазе, используем --duration")
+            
+            return network_params, r_target, poc_duration_minutes
     
     # Fallback
     log_info(f"Используем fallback параметры (r_target={DEFAULT_R_TARGET})")
-    return DEFAULT_POC_PARAMS.copy(), DEFAULT_R_TARGET
+    return DEFAULT_POC_PARAMS.copy(), DEFAULT_R_TARGET, None
 
 
 # ============ ДОБАВЛЕНИЕ ПУТЕЙ К GONKA ============
@@ -442,7 +622,7 @@ class GonkaBenchmark:
     def __init__(
         self,
         device: str = "cuda:0",
-        duration_min: float = DEFAULT_DURATION_MIN,
+        duration_min: float = None,  # None = использовать из сети
         batch_size: int = None,
         r_target: float = None,
         num_gpus: int = None,
@@ -450,8 +630,9 @@ class GonkaBenchmark:
         use_network_params: bool = True,
     ):
         # Получаем параметры из сети или используем fallback
+        poc_duration_from_network = None
         if poc_params is None or r_target is None:
-            network_poc_params, network_r_target = get_poc_params(use_network=use_network_params)
+            network_poc_params, network_r_target, poc_duration_from_network = get_poc_params(use_network=use_network_params)
             if poc_params is None:
                 poc_params = network_poc_params
             if r_target is None:
@@ -459,6 +640,17 @@ class GonkaBenchmark:
         
         self.poc_params = poc_params
         self.r_target = r_target
+        
+        # Определяем длительность: приоритет у аргумента --duration, потом из сети, потом default
+        if duration_min is not None:
+            self.duration_sec = duration_min * 60
+            log_info(f"Используем указанную длительность: {duration_min} мин")
+        elif poc_duration_from_network is not None:
+            self.duration_sec = poc_duration_from_network * 60
+            log_success(f"Используем длительность из PoC фазы: {poc_duration_from_network} мин")
+        else:
+            self.duration_sec = DEFAULT_DURATION_MIN * 60
+            log_info(f"Используем default длительность: {DEFAULT_DURATION_MIN} мин")
         
         # Поддержка нескольких GPU
         if num_gpus is None:
@@ -468,7 +660,6 @@ class GonkaBenchmark:
         self.device_ids = list(range(self.num_gpus)) if self.num_gpus > 0 else [0]
         self.device = torch.device(f"cuda:{self.device_ids[0]}") if self.num_gpus > 0 else torch.device("cpu")
 
-        self.duration_sec = duration_min * 60
         self.batch_size = batch_size
 
         # Параметры для теста
@@ -516,7 +707,8 @@ class GonkaBenchmark:
         cuda_line = "║  CUDA: " + str(cuda_version)
         print(cuda_line + " " * (63 - 2 - len(cuda_line)) + "║")
 
-        dur_line = f"║  Test duration: {int(self.duration_sec // 60)} minutes"
+        dur_min = self.duration_sec / 60
+        dur_line = f"║  Test duration: {dur_min:.2f} minutes"
         print(dur_line + " " * (63 - 2 - len(dur_line)) + "║")
 
         rtarget_line = f"║  RTarget: {self.r_target}"
@@ -857,8 +1049,8 @@ def main():
     parser.add_argument(
         "--duration", "-d",
         type=float,
-        default=DEFAULT_DURATION_MIN,
-        help=f"Время теста в минутах (по умолчанию: {DEFAULT_DURATION_MIN})"
+        default=None,
+        help=f"Время теста в минутах (по умолчанию: из PoC фазы сети или {DEFAULT_DURATION_MIN})"
     )
 
     parser.add_argument(
@@ -932,10 +1124,16 @@ def main():
         log_error("CUDA недоступна, используя CPU")
         args.device = "cpu"
 
+    # Если offline и duration не указан - используем default
+    duration_to_use = args.duration
+    if args.offline and duration_to_use is None:
+        duration_to_use = DEFAULT_DURATION_MIN
+        log_info(f"Offline режим: используем default длительность {DEFAULT_DURATION_MIN} мин")
+
     # Создаём и запускаем бенчмарк
     benchmark = GonkaBenchmark(
         device=args.device,
-        duration_min=args.duration,
+        duration_min=duration_to_use,
         batch_size=args.batch_size,
         num_gpus=args.num_gpus,
         r_target=args.r_target,
