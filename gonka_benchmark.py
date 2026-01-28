@@ -106,6 +106,36 @@ def log_error(msg: str):
     print(f"{Colors.RED}[✗]{Colors.END} {msg}")
 
 
+# ============ HELPER: Парсинг значений с экспонентой ============
+def parse_exp_value(obj: Any, default: float = None) -> Optional[float]:
+    """
+    Парсит значение из формата {"value": "1398077", "exponent": -6}
+    Возвращает float или default
+    """
+    if obj is None:
+        return default
+    
+    if isinstance(obj, (int, float)):
+        return float(obj)
+    
+    if isinstance(obj, dict):
+        value = obj.get("value")
+        exponent = obj.get("exponent", 0)
+        if value is not None:
+            try:
+                return float(value) * (10 ** int(exponent))
+            except (ValueError, TypeError):
+                return default
+    
+    if isinstance(obj, str):
+        try:
+            return float(obj)
+        except ValueError:
+            return default
+    
+    return default
+
+
 # ============ ПОЛУЧЕНИЕ ПАРАМЕТРОВ ИЗ СЕТИ ============
 def fetch_poc_params_from_network(timeout: float = 5.0) -> Optional[Dict[str, Any]]:
     """
@@ -132,25 +162,32 @@ def fetch_poc_params_from_network(timeout: float = 5.0) -> Optional[Dict[str, An
                     data = response.json()
                     
                     # Извлекаем PoC параметры
+                    # Правильный путь: params.poc_params.model_params
                     params = data.get("params", {})
-                    poc_params = params.get("poc_model_params", {})
+                    poc_params = params.get("poc_params", {})
+                    model_params = poc_params.get("model_params", {})
                     
-                    if not poc_params:
+                    if not model_params:
                         continue
                     
+                    # Парсим значения с учётом формата {"value": "X", "exponent": Y}
+                    r_target = parse_exp_value(model_params.get("r_target"), DEFAULT_R_TARGET)
+                    ffn_dim_multiplier = parse_exp_value(model_params.get("ffn_dim_multiplier"), DEFAULT_POC_PARAMS["ffn_dim_multiplier"])
+                    norm_eps = parse_exp_value(model_params.get("norm_eps"), DEFAULT_POC_PARAMS["norm_eps"])
+                    
                     result = {
-                        "r_target": float(poc_params.get("r_target", DEFAULT_R_TARGET)),
-                        "dim": int(poc_params.get("dim", DEFAULT_POC_PARAMS["dim"])),
-                        "n_layers": int(poc_params.get("n_layers", DEFAULT_POC_PARAMS["n_layers"])),
-                        "n_heads": int(poc_params.get("n_heads", DEFAULT_POC_PARAMS["n_heads"])),
-                        "n_kv_heads": int(poc_params.get("n_kv_heads", DEFAULT_POC_PARAMS["n_kv_heads"])),
-                        "vocab_size": int(poc_params.get("vocab_size", DEFAULT_POC_PARAMS["vocab_size"])),
-                        "ffn_dim_multiplier": float(poc_params.get("ffn_dim_multiplier", DEFAULT_POC_PARAMS["ffn_dim_multiplier"])),
-                        "multiple_of": int(poc_params.get("multiple_of", DEFAULT_POC_PARAMS["multiple_of"])),
-                        "norm_eps": float(poc_params.get("norm_eps", DEFAULT_POC_PARAMS["norm_eps"])),
-                        "rope_theta": float(poc_params.get("rope_theta", DEFAULT_POC_PARAMS["rope_theta"])),
-                        "use_scaled_rope": bool(poc_params.get("use_scaled_rope", DEFAULT_POC_PARAMS["use_scaled_rope"])),
-                        "seq_len": int(poc_params.get("seq_len", DEFAULT_POC_PARAMS["seq_len"])),
+                        "r_target": r_target,
+                        "dim": int(model_params.get("dim", DEFAULT_POC_PARAMS["dim"])),
+                        "n_layers": int(model_params.get("n_layers", DEFAULT_POC_PARAMS["n_layers"])),
+                        "n_heads": int(model_params.get("n_heads", DEFAULT_POC_PARAMS["n_heads"])),
+                        "n_kv_heads": int(model_params.get("n_kv_heads", DEFAULT_POC_PARAMS["n_kv_heads"])),
+                        "vocab_size": int(model_params.get("vocab_size", DEFAULT_POC_PARAMS["vocab_size"])),
+                        "ffn_dim_multiplier": ffn_dim_multiplier,
+                        "multiple_of": int(model_params.get("multiple_of", DEFAULT_POC_PARAMS["multiple_of"])),
+                        "norm_eps": norm_eps,
+                        "rope_theta": float(model_params.get("rope_theta", DEFAULT_POC_PARAMS["rope_theta"])),
+                        "use_scaled_rope": bool(model_params.get("use_scaled_rope", DEFAULT_POC_PARAMS["use_scaled_rope"])),
+                        "seq_len": int(model_params.get("seq_len", DEFAULT_POC_PARAMS["seq_len"])),
                         "source_node": node_url,
                     }
                     
