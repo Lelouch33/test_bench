@@ -292,9 +292,44 @@ if [[ "$BENCH_MODE" == "v2" ]]; then
         sleep 2
     fi
 
-    # Определяем количество GPU
+    # Определяем количество GPU и VRAM для автоподбора tensor-parallel-size
     GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l || echo "1")
-    log_info "GPU для vLLM: $GPU_COUNT"
+    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | xargs)
+    GPU_VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1 | xargs)
+    GPU_VRAM_GB=$((GPU_VRAM_MB / 1024))
+    TOTAL_VRAM_GB=$((GPU_VRAM_GB * GPU_COUNT))
+
+    # Qwen3-235B-FP8 требует ~320GB VRAM
+    MODEL_VRAM_REQUIRED=320
+
+    log_info "GPU: ${GPU_COUNT}× ${GPU_NAME} (${GPU_VRAM_GB}GB каждая, ${TOTAL_VRAM_GB}GB всего)"
+
+    if [[ $TOTAL_VRAM_GB -lt $MODEL_VRAM_REQUIRED ]]; then
+        log_error "Недостаточно VRAM! Нужно ~${MODEL_VRAM_REQUIRED}GB, доступно ${TOTAL_VRAM_GB}GB"
+        log_error "Модель Qwen3-235B-FP8 не поместится на ${GPU_COUNT}× ${GPU_NAME}"
+        exit 1
+    fi
+
+    # Автоподбор TP: минимальное количество GPU, чтобы суммарный VRAM >= MODEL_VRAM_REQUIRED
+    # TP должен быть степенью 2 (1, 2, 4, 8)
+    TP_SIZE=1
+    for tp in 1 2 4 8; do
+        if [[ $tp -le $GPU_COUNT ]] && [[ $((GPU_VRAM_GB * tp)) -ge $MODEL_VRAM_REQUIRED ]]; then
+            TP_SIZE=$tp
+            break
+        fi
+    done
+
+    # Если ни одна степень 2 не подошла — ошибка
+    # vLLM требует TP = степень 2 (1, 2, 4, 8)
+    if [[ $((GPU_VRAM_GB * TP_SIZE)) -lt $MODEL_VRAM_REQUIRED ]]; then
+        log_error "Не удалось подобрать TP (степень 2) для ${GPU_COUNT}× ${GPU_NAME} (${GPU_VRAM_GB}GB)"
+        log_error "vLLM поддерживает tensor-parallel-size = 1, 2, 4, 8"
+        log_error "Нужно ~${MODEL_VRAM_REQUIRED}GB, но ближайшая степень 2 GPU не покрывает"
+        exit 1
+    fi
+
+    log_info "Tensor Parallel: TP=${TP_SIZE} (${GPU_VRAM_GB}GB × ${TP_SIZE} = $((GPU_VRAM_GB * TP_SIZE))GB >= ${MODEL_VRAM_REQUIRED}GB)"
 
     # Проверяем наличие образа
     if ! docker image inspect "$VLLM_IMAGE" &> /dev/null; then
@@ -319,7 +354,7 @@ if [[ "$BENCH_MODE" == "v2" ]]; then
         --host 0.0.0.0 \
         --port "$VLLM_PORT" \
         --enforce-eager \
-        --tensor-parallel-size "$GPU_COUNT" \
+        --tensor-parallel-size "$TP_SIZE" \
         --dtype float16 \
         --max-model-len 240000
 
