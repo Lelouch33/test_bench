@@ -2,14 +2,34 @@
 
 Автономный бенчмарк для тестирования производительности GPU для Proof-of-Compute в сети Gonka.
 
+Поддерживает два режима:
+- **V1** — локальные GPU вычисления через модуль `pow.compute`
+- **V2** — cPoC через vLLM API (docker-контейнер с моделью Qwen3-235B)
+
 ## Быстрый старт
 
 ```bash
-# Клонирование и запуск (всё автоматически)
 git clone https://github.com/Lelouch33/test_bench.git
 cd test_bench
 bash run.sh
 ```
+
+При запуске появится интерактивное меню выбора режима:
+
+```
+╔══════════════════════════════════════════════════════════════════╗
+║              Gonka Benchmark - Выбор режима                      ║
+╠══════════════════════════════════════════════════════════════════╣
+║                                                                  ║
+║   1) PoC V1 — локальные GPU вычисления (pow.compute)            ║
+║   2) PoC V2 — через vLLM API (cPoC, docker)                    ║
+║                                                                  ║
+╚══════════════════════════════════════════════════════════════════╝
+
+Выберите режим [1/2]:
+```
+
+Можно также указать режим через флаг: `bash run.sh --mode v1` или `bash run.sh --mode v2`.
 
 ## Формула расчёта веса
 
@@ -24,36 +44,84 @@ var WeightScaleFactor = mathsdk.LegacyNewDecWithPrec(25, 1) // 2.5
 weight = mathsdk.LegacyNewDec(weight).Mul(WeightScaleFactor).TruncateInt64()
 ```
 
-## Возможности v1.2
+## Режимы работы
 
-- ✅ **Динамическое получение параметров** — r_target и другие параметры автоматически загружаются из сети Gonka
+### PoC V1 — локальные вычисления
+
+Использует модуль `pow.compute` из gonka для расчёта PoW напрямую на GPU.
+
+- Скачивает код gonka (sparse checkout)
+- Загружает модель на каждый GPU
+- Автоподбор batch size
+- Multi-GPU через multiprocessing
+
+```bash
+bash run.sh --mode v1                # или просто выбрать 1 в меню
+bash run.sh --mode v1 --duration 3   # 3 минуты
+bash run.sh --mode v1 --num-gpus 2   # 2 GPU
+```
+
+### PoC V2 — cPoC через vLLM API
+
+Использует docker-контейнер с кастомным vLLM (`gonka-ai/vllm`) и моделью `Qwen3-235B-A22B-Instruct-2507-FP8`. Бенчмарк отправляет запросы через HTTP API и измеряет скорость генерации артефактов.
+
+**Требования:** Docker с поддержкой NVIDIA GPU (`nvidia-container-toolkit`)
+
+```bash
+bash run.sh --mode v2                # или выбрать 2 в меню
+bash run.sh --mode v2 --duration 5   # 5 минут
+```
+
+Что делает V2:
+1. Пуллит docker-образ `ghcr.io/gonka-ai/vllm:v0.9.1-poc-v2-post1-blackwell`
+2. Запускает контейнер с `--gpus all`, `--enforce-eager`, `--tensor-parallel-size`
+3. Ждёт health check (загрузка модели)
+4. Прогревает — ждёт первый batch nonces
+5. Запускает бенчмарк: `POST /api/v1/pow/init/generate`
+6. Опрашивает `GET /api/v1/pow/status` каждые 5 секунд
+7. По окончании останавливает генерацию и контейнер
+
+V2 параметры (из сети Gonka):
+- `model`: Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
+- `seq_len`: 1024
+- `k_dim`: 12
+- `batch_size`: 32
+
+## Возможности
+
+- ✅ **Два режима бенчмарка** — V1 (локальный) и V2 (vLLM API)
+- ✅ **Интерактивное меню** — выбор режима при запуске
+- ✅ **Динамическое получение параметров** — r_target, model_id, seq_len автоматически из сети
 - ✅ **Отказоустойчивость** — пробует все genesis ноды пока не получит ответ
-- ✅ **Информация о PoC фазе** — получение реальной длительности PoC из блокчейна
-- ✅ **Multi-GPU поддержка** — автоматическое использование всех доступных GPU
+- ✅ **Информация о PoC фазе** — реальная длительность из блокчейна
+- ✅ **Multi-GPU поддержка** — V1: multiprocessing, V2: tensor parallelism
+- ✅ **Автоочистка** — V2 автоматически останавливает docker-контейнер
 
 ## Быстрый старт (один скрипт)
 
 ```bash
-# Скачать и запустить — всё автоматически
 bash run.sh
 ```
 
 Скрипт `run.sh` автоматически:
-1. Проверяет GPU и определяет версию CUDA
-2. Устанавливает Python 3.12 (если нет)
-3. Устанавливает uv
-4. Создаёт venv и ставит PyTorch под вашу CUDA
-5. Скачивает код PoW модуля
+1. Предлагает выбрать режим (V1/V2)
+2. Проверяет GPU и определяет версию CUDA
+3. Устанавливает Python 3.12 (если нет)
+4. Устанавливает uv и создаёт venv с PyTorch
+5. **V1:** скачивает код PoW модуля / **V2:** запускает docker-контейнер vLLM
 6. Запускает бенчмарк
 
 ### С параметрами
 
 ```bash
-bash run.sh --duration 3      # 3 минуты
-bash run.sh --duration 10     # 10 минут  
-bash run.sh --device cuda:1   # Другой GPU
-bash run.sh --batch-size 256  # Ручной batch size
-bash run.sh --offline         # Без запроса параметров из сети
+# V1
+bash run.sh --mode v1 --duration 3      # 3 минуты
+bash run.sh --mode v1 --device cuda:1   # Другой GPU
+bash run.sh --mode v1 --batch-size 256  # Ручной batch size
+
+# V2
+bash run.sh --mode v2 --duration 5      # 5 минут
+bash run.sh --mode v2 --batch-size 64   # Другой batch size
 ```
 
 ## Утилиты
@@ -104,25 +172,40 @@ python3 gonka_benchmark.py
 
 ## Метрики
 
-| Метрика | Описание |
-|---------|----------|
-| `valid_nonces` | Количество валидных nonce за тест |
-| `poc_weight` | Вес в сети = valid_nonces × 2.5 |
-| `valid/min` | Валидных nonce в минуту |
-| `raw/min` | Всего проверок в минуту |
-| `1 in N` | Соотношение (всего / валидные) |
+| Метрика | V1 | V2 | Описание |
+|---------|----|----|----------|
+| `valid_nonces` | ✅ | ✅ | Количество nonces за тест |
+| `poc_weight` | ✅ | ✅ | Вес в сети = nonces × 2.5 |
+| `valid/min` | ✅ | ✅ | Nonces в минуту |
+| `raw/min` | ✅ | - | Всего проверок в минуту |
+| `peak/min` | - | ✅ | Пиковая скорость за тест |
+| `1 in N` | ✅ | - | Соотношение (всего / валидные) |
 
-## Параметры
+## Параметры V1
 
 | Параметр | По умолчанию | Описание |
 |----------|--------------|----------|
-| `--duration, -d` | `5` | Время теста в минутах |
+| `--duration, -d` | из сети / `5` | Время теста в минутах |
 | `--device` | `cuda:0` | GPU устройство |
 | `--batch-size, -b` | `auto` | Batch size |
 | `--num-gpus, -n` | `all` | Количество GPU |
 | `--offline` | `false` | Не запрашивать параметры из сети |
 | `--r-target` | `auto` | Переопределить RTarget |
 | `--save-nonces` | `false` | Сохранять valid nonce для дедупликации |
+| `--no-save` | `false` | Не сохранять результаты |
+
+## Параметры V2
+
+| Параметр | По умолчанию | Описание |
+|----------|--------------|----------|
+| `--duration, -d` | из сети / `5` | Время теста в минутах |
+| `--vllm-url` | `http://localhost:5000` | URL vLLM сервера |
+| `--vllm-port` | `5000` | Порт vLLM сервера |
+| `--batch-size, -b` | `32` | Batch size |
+| `--seq-len` | из сети / `1024` | Sequence length |
+| `--k-dim` | `12` | K dimensions |
+| `--model` | из сети | Model ID |
+| `--offline` | `false` | Не запрашивать параметры из сети |
 | `--no-save` | `false` | Не сохранять результаты |
 
 ## Пример вывода
@@ -202,12 +285,13 @@ index, name, memory.total, driver_version
 ## Структура проекта
 
 ```
-pow-benchmark/
-├── run.sh                    # Главный скрипт (всё в одном)
-├── gonka_benchmark.py        # Бенчмарк
+test_bench/
+├── run.sh                    # Главный скрипт (V1/V2, интерактивное меню)
+├── gonka_benchmark.py        # V1 бенчмарк (локальные GPU вычисления)
+├── gonka_benchmark_v2.py     # V2 бенчмарк (cPoC через vLLM API)
 ├── fetch_poc_duration.py     # Получение параметров из сети
 ├── benchmark_visualizer.py   # Визуализация результатов
-├── analyze_results.py        # Анализ результатов
+├── analyze_results.py        # Анализ результатов (V1/V2)
 ├── deduplicate_nonces.py     # Дедупликация и объединение
 ├── setup.sh                  # Только установка (без запуска)
 ├── README.md                 # Документация

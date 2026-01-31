@@ -63,14 +63,29 @@ def get_poc_weight(result: Dict[str, Any]) -> int:
     return int(valid_nonces * WEIGHT_SCALE_FACTOR)
 
 
+def get_mode(result: Dict[str, Any]) -> str:
+    """Определяет режим бенчмарка (v1 или v2)"""
+    return result.get("mode", "v1")
+
+
+def get_mode_label(result: Dict[str, Any]) -> str:
+    """Возвращает цветной лейбл режима"""
+    mode = get_mode(result)
+    if mode == "v2":
+        return f"{Colors.YELLOW}[V2]{Colors.END}"
+    return f"{Colors.BLUE}[V1]{Colors.END}"
+
+
 def print_result(result: Dict[str, Any], index: int = None):
     """Выводит информацию о результате"""
     prefix = f"{Colors.BOLD}[{index}]{Colors.END} " if index is not None else ""
+    mode_label = get_mode_label(result)
+    mode = get_mode(result)
 
     # Основные метрики
-    valid_nonces = result.get("valid_nonces", result.get("comp_power", 0))
+    valid_nonces = result.get("valid_nonces", result.get("total_nonces", result.get("comp_power", 0)))
     poc_weight = get_poc_weight(result)
-    valid_per_min = result.get("valid_per_min", 0)
+    valid_per_min = result.get("valid_per_min", result.get("nonces_per_min", 0))
     raw_per_min = result.get("raw_per_min", 0)
     one_in_n = result.get("one_in_n", 0)
     duration = result.get("duration_min", 0)
@@ -89,20 +104,28 @@ def print_result(result: Dict[str, Any], index: int = None):
     except:
         date_str = timestamp[:16] if timestamp else "Unknown"
 
-    print(f"{prefix}{Colors.CYAN}{date_str}{Colors.END}")
+    print(f"{prefix}{mode_label} {Colors.CYAN}{date_str}{Colors.END}")
     print(f"  GPU: {gpu_name} ({gpu_memory}GB)")
     print(f"  Driver: {driver} | CUDA: {result.get('cuda_version', 'N/A')}")
     print(f"  Batch size: {result.get('batch_size', 'N/A')}")
 
+    if mode == "v2":
+        print(f"  Model: {result.get('model_id', 'N/A')}")
+        print(f"  seq_len: {result.get('seq_len', 'N/A')} | k_dim: {result.get('k_dim', 'N/A')}")
+
     # Основная таблица
-    print(f"  ┌─────────────────────────────────────────────────────┐")
-    print(f"  │ {Colors.CYAN}valid_nonces:{Colors.END}     {valid_nonces:<10}                    │")
-    print(f"  │ {Colors.GREEN}poc_weight:{Colors.END}       {poc_weight:<10}                    │")
-    print(f"  │ {Colors.CYAN}valid/min:{Colors.END}        {format_number(valid_per_min):<10}                    │")
-    print(f"  │ {Colors.CYAN}raw/min:{Colors.END}          {format_number(raw_per_min):<10}                    │")
-    print(f"  │ {Colors.CYAN}1 in N:{Colors.END}           {one_in_n:<10.0f}                    │")
-    print(f"  │ {Colors.CYAN}duration:{Colors.END}         {duration:.2f} min                       │")
-    print(f"  └─────────────────────────────────────────────────────┘")
+    print(f"  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510")
+    print(f"  \u2502 {Colors.CYAN}valid_nonces:{Colors.END}     {valid_nonces:<10}                    \u2502")
+    print(f"  \u2502 {Colors.GREEN}poc_weight:{Colors.END}       {poc_weight:<10}                    \u2502")
+    print(f"  \u2502 {Colors.CYAN}valid/min:{Colors.END}        {format_number(valid_per_min):<10}                    \u2502")
+    if mode == "v1":
+        print(f"  \u2502 {Colors.CYAN}raw/min:{Colors.END}          {format_number(raw_per_min):<10}                    \u2502")
+        print(f"  \u2502 {Colors.CYAN}1 in N:{Colors.END}           {one_in_n:<10.0f}                    \u2502")
+    else:
+        peak = result.get("peak_rate_per_min", 0)
+        print(f"  \u2502 {Colors.CYAN}peak/min:{Colors.END}         {format_number(peak):<10}                    \u2502")
+    print(f"  \u2502 {Colors.CYAN}duration:{Colors.END}         {duration:.2f} min                       \u2502")
+    print(f"  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518")
 
 
 def print_comparison_table(results: List[Dict[str, Any]]):
@@ -111,21 +134,22 @@ def print_comparison_table(results: List[Dict[str, Any]]):
         return
 
     print(f"\n{Colors.BOLD}Сравнение запусков:{Colors.END}")
-    print(f"{'Дата':<16} {'GPU':<20} {'valid':<8} {'poc_w':<8} {'valid/min':<12} {'raw/min':<12}")
-    print("─" * 82)
+    print(f"{'Mode':<6} {'Дата':<16} {'GPU':<20} {'valid':<8} {'poc_w':<8} {'valid/min':<12} {'raw/min':<12}")
+    print("\u2500" * 88)
 
     for r in results:
+        mode = get_mode(r).upper()
         timestamp = r.get("timestamp", "")[:16]
         gpu = r.get("gpu", {}).get("name", "Unknown")[:20]
-        vn = r.get("valid_nonces", r.get("comp_power", 0))
+        vn = r.get("valid_nonces", r.get("total_nonces", r.get("comp_power", 0)))
         pw = get_poc_weight(r)
-        vpm = r.get("valid_per_min", 0)
-        rpm = r.get("raw_per_min", 0)
+        vpm = r.get("valid_per_min", r.get("nonces_per_min", 0))
+        rpm = r.get("raw_per_min", r.get("peak_rate_per_min", 0))
 
-        print(f"{timestamp:<16} {gpu:<20} {vn:<8} {pw:<8} {format_number(vpm):<12} {format_number(rpm):<12}")
+        print(f"{mode:<6} {timestamp:<16} {gpu:<20} {vn:<8} {pw:<8} {format_number(vpm):<12} {format_number(rpm):<12}")
 
-    # Находим лучший
-    best = max(results, key=lambda x: x.get("valid_per_min", 0))
+    # Лучший по valid_per_min
+    best = max(results, key=lambda x: x.get("valid_per_min", x.get("nonces_per_min", 0)))
     print(f"\n{Colors.GREEN}Лучший результат:{Colors.END}")
     print_result(best)
 
@@ -169,6 +193,12 @@ def main():
         action="store_true",
         help="Показать полную информацию (JSON)"
     )
+    parser.add_argument(
+        "--mode", "-m",
+        choices=["v1", "v2", "all"],
+        default="all",
+        help="Фильтр по режиму: v1, v2 или all (по умолчанию: all)"
+    )
 
     args = parser.parse_args()
 
@@ -197,6 +227,14 @@ def main():
 
     if not results:
         print(f"{Colors.RED}Не удалось загрузить результаты{Colors.END}")
+        return 1
+
+    # Фильтруем по режиму
+    if args.mode != "all":
+        results = [r for r in results if get_mode(r) == args.mode]
+
+    if not results:
+        print(f"{Colors.YELLOW}Нет результатов для режима {args.mode}{Colors.END}")
         return 1
 
     # Сортируем по времени
