@@ -666,7 +666,8 @@ class GonkaBenchmarkV2:
 
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
         gpu_name = results.get("gpu", {}).get("name", "Unknown").replace(" ", "_").replace("/", "_")
-        filename = f"{timestamp}_V2_{gpu_name}_{results['poc_weight']}.json"
+        mode_upper = results.get("mode", "v2").upper()
+        filename = f"{timestamp}_{mode_upper}_{gpu_name}_{results['poc_weight']}.json"
         filepath = output_path / filename
 
         with open(filepath, "w") as f:
@@ -712,6 +713,8 @@ def main():
                         help="Не сохранять результаты")
     parser.add_argument("--offline", action="store_true",
                         help="Не запрашивать параметры из сети")
+    parser.add_argument("--mode-label", type=str, default="v2",
+                        help="Метка режима для результатов (по умолчанию: v2)")
 
     args = parser.parse_args()
 
@@ -733,6 +736,7 @@ def main():
     results = benchmark.run()
 
     if results:
+        results["mode"] = args.mode_label
         if not args.no_save:
             benchmark.save_results(results, args.output)
         log_success("Бенчмарк V2 завершён!")

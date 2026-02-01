@@ -6,12 +6,13 @@
 # 1. Проверяет/устанавливает Python 3.12
 # 2. Устанавливает uv
 # 3. Создаёт venv и ставит зависимости (PyTorch под нужную CUDA)
-# 4. Скачивает код gonka (V1) или запускает docker (V2)
+# 4. Скачивает код gonka (V1), запускает docker (V2), или нативный vLLM (V3)
 # 5. Запускает бенчмарк
 #
 # Использование:
 #   bash run.sh                    # V1 бенчмарк (по умолчанию)
-#   bash run.sh --mode v2          # V2 бенчмарк (cPoC через vLLM)
+#   bash run.sh --mode v2          # V2 бенчмарк (cPoC через vLLM Docker)
+#   bash run.sh --mode v3          # V3 бенчмарк (cPoC через нативный vLLM 0.14.0)
 #   bash run.sh --duration 3       # 3 минуты
 #   bash run.sh --help             # Справка
 # ═══════════════════════════════════════════════════════════════════════════
@@ -81,15 +82,19 @@ if [[ -z "$BENCH_MODE" ]]; then
     echo -e "${CYAN}║${NC}   ${YELLOW}2)${NC} PoC V2 — через vLLM API (cPoC, docker)                      ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}      Запускает vLLM контейнер с моделью и тестирует через API    ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}                                                                  ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${BLUE}3)${NC} PoC V3 — нативный vLLM 0.14.0 + gonka_poc                   ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}      Устанавливает vLLM нативно (без Docker), тот же API        ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}                                                                  ${CYAN}║${NC}"
     echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 
     while true; do
-        read -p "$(echo -e "${BOLD}Выберите режим [1/2]: ${NC}")" choice
+        read -p "$(echo -e "${BOLD}Выберите режим [1/2/3]: ${NC}")" choice
         case "$choice" in
             1) BENCH_MODE="v1"; break ;;
             2) BENCH_MODE="v2"; break ;;
-            *) echo -e "${RED}Введите 1 или 2${NC}" ;;
+            3) BENCH_MODE="v3"; break ;;
+            *) echo -e "${RED}Введите 1, 2 или 3${NC}" ;;
         esac
     done
     echo ""
@@ -99,7 +104,13 @@ fi
 # Заголовок
 # ═══════════════════════════════════════════════════════════════════════════
 echo ""
-if [[ "$BENCH_MODE" == "v2" ]]; then
+if [[ "$BENCH_MODE" == "v3" ]]; then
+    echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}${BOLD}║         Gonka PoC V3 Benchmark - Native vLLM 0.14.0              ║${NC}"
+    echo -e "${CYAN}${BOLD}║         Mode: V3 (cPoC via native vLLM + gonka_poc)              ║${NC}"
+    echo -e "${CYAN}${BOLD}║  Формула: poc_weight = total_nonces × WeightScaleFactor           ║${NC}"
+    echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════════╝${NC}"
+elif [[ "$BENCH_MODE" == "v2" ]]; then
     echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}${BOLD}║         Gonka PoC V2 Benchmark - All-in-One v1.0                 ║${NC}"
     echo -e "${CYAN}${BOLD}║         Mode: V2 (cPoC via vLLM API)                             ║${NC}"
@@ -142,8 +153,13 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 2. Python 3.12
+# 2-4. Python 3.12 + uv + venv (пропускаем для V3 — setup скрипт всё ставит)
 # ═══════════════════════════════════════════════════════════════════════════
+if [[ "$BENCH_MODE" == "v3" ]]; then
+    log_step "2-4/6 Пропуск (V3 использует системный Python + vLLM)"
+    log_info "V3: Python/uv/venv управляются через setup_v3_*.sh"
+else
+
 log_step "2/6 Python 3.12"
 
 install_python312() {
@@ -269,14 +285,138 @@ if [[ "$CUDA_AVAILABLE" == "True" ]]; then
     log_success "GPU: $GPU_NAME"
 fi
 
+fi  # end of V3 skip block
+
 # ═══════════════════════════════════════════════════════════════════════════
-# 5. Подготовка (V1: код Gonka, V2: Docker)
+# 5. Подготовка (V1: код Gonka, V2: Docker, V3: Native vLLM)
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Создаём директорию для результатов
 mkdir -p "$RESULTS_DIR"
 
-if [[ "$BENCH_MODE" == "v2" ]]; then
+if [[ "$BENCH_MODE" == "v3" ]]; then
+    # ===================== V3: Native vLLM 0.14.0 =====================
+    log_step "5/6 Native vLLM 0.14.0 (V3)"
+
+    # Определяем GPU
+    GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l || echo "1")
+    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | xargs)
+    GPU_VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1 | xargs)
+    GPU_VRAM_GB=$((GPU_VRAM_MB / 1024))
+    TOTAL_VRAM_GB=$((GPU_VRAM_GB * GPU_COUNT))
+
+    MODEL_VRAM_REQUIRED=310
+
+    IS_BLACKWELL=0
+    if echo "$GPU_NAME" | grep -qiE '(B200|B100|GB200|B300)'; then
+        IS_BLACKWELL=1
+        log_info "GPU: ${GPU_COUNT}× ${GPU_NAME} — Blackwell"
+    else
+        log_info "GPU: ${GPU_COUNT}× ${GPU_NAME}"
+    fi
+
+    log_info "GPU: ${GPU_COUNT}× ${GPU_NAME} (${GPU_VRAM_GB}GB каждая, ${TOTAL_VRAM_GB}GB всего)"
+
+    if [[ $TOTAL_VRAM_GB -lt $MODEL_VRAM_REQUIRED ]]; then
+        log_error "Недостаточно VRAM! Нужно ~${MODEL_VRAM_REQUIRED}GB, доступно ${TOTAL_VRAM_GB}GB"
+        log_error "Модель Qwen3-235B-FP8 не поместится на ${GPU_COUNT}× ${GPU_NAME}"
+        exit 1
+    fi
+
+    # Автоподбор TP: минимальное количество GPU, чтобы суммарный VRAM >= MODEL_VRAM_REQUIRED
+    TP_SIZE=1
+    for tp in 1 2 4 8; do
+        if [[ $tp -le $GPU_COUNT ]] && [[ $((GPU_VRAM_GB * tp)) -ge $MODEL_VRAM_REQUIRED ]]; then
+            TP_SIZE=$tp
+            break
+        fi
+    done
+
+    if [[ $((GPU_VRAM_GB * TP_SIZE)) -lt $MODEL_VRAM_REQUIRED ]]; then
+        log_error "Не удалось подобрать TP (степень 2) для ${GPU_COUNT}× ${GPU_NAME} (${GPU_VRAM_GB}GB)"
+        exit 1
+    fi
+
+    log_info "Tensor Parallel: TP=${TP_SIZE} (${GPU_VRAM_GB}GB × ${TP_SIZE} = $((GPU_VRAM_GB * TP_SIZE))GB >= ${MODEL_VRAM_REQUIRED}GB)"
+
+    # Проверяем, установлен ли уже vLLM + gonka_poc
+    V3_INSTALLED=0
+    if python3.12 -c "import vllm; from vllm.gonka_poc import PoCManagerV1" 2>/dev/null; then
+        VLLM_VER=$(python3.12 -c "import vllm; print(vllm.__version__)" 2>/dev/null || echo "unknown")
+        if [[ "$VLLM_VER" == "0.14.0" ]]; then
+            V3_INSTALLED=1
+            log_success "vLLM 0.14.0 + gonka_poc уже установлены"
+        fi
+    fi
+
+    if [[ $V3_INSTALLED -eq 0 ]]; then
+        log_info "Запуск установки vLLM 0.14.0 + gonka_poc..."
+        if [[ $IS_BLACKWELL -eq 1 ]]; then
+            log_info "Используем setup_v3_blackwell.sh"
+            sudo bash "$SCRIPT_DIR/setup_v3_blackwell.sh"
+        else
+            log_info "Используем setup_v3_universal.sh"
+            sudo bash "$SCRIPT_DIR/setup_v3_universal.sh"
+        fi
+        log_success "Установка завершена"
+    fi
+
+    # Очищаем процессы на GPU перед запуском
+    log_info "Очистка процессов на GPU..."
+    pkill -9 -f "vllm.entrypoints" 2>/dev/null || true
+    pkill -9 -f "python.*vllm" 2>/dev/null || true
+    sleep 3
+
+    # Запуск vLLM напрямую (в фоне)
+    log_info "Запуск vLLM 0.14.0 нативно..."
+    VLLM_USE_V1=1 VLLM_USE_CUDA_GRAPHS=0 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
+    python3.12 -m vllm.entrypoints.openai.api_server \
+        --model "$VLLM_MODEL" --host 0.0.0.0 --port "$VLLM_PORT" \
+        --enforce-eager --tensor-parallel-size "$TP_SIZE" \
+        --dtype float16 --max-model-len 240000 &
+    VLLM_PID=$!
+
+    log_success "vLLM запущен (PID: $VLLM_PID)"
+
+    # Health check
+    log_info "Ожидание готовности vLLM (загрузка модели)..."
+    VLLM_TIMEOUT=600
+    elapsed=0
+    while [[ $elapsed -lt $VLLM_TIMEOUT ]]; do
+        if curl -s -f -m 5 "http://127.0.0.1:${VLLM_PORT}/health" > /dev/null 2>&1; then
+            log_success "vLLM готов!"
+            break
+        fi
+
+        # Проверяем что процесс ещё жив
+        if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+            log_error "vLLM процесс завершился!"
+            exit 1
+        fi
+
+        echo -ne "  ... ожидание ${elapsed}s / ${VLLM_TIMEOUT}s\r"
+        sleep 10
+        elapsed=$((elapsed + 10))
+    done
+    echo ""
+
+    if [[ $elapsed -ge $VLLM_TIMEOUT ]]; then
+        log_error "vLLM не стал доступен за ${VLLM_TIMEOUT}s"
+        kill "$VLLM_PID" 2>/dev/null || true
+        exit 1
+    fi
+
+    # Функция очистки при выходе
+    cleanup_v3() {
+        echo ""
+        log_info "Останавливаем vLLM процесс (PID: $VLLM_PID)..."
+        kill "$VLLM_PID" 2>/dev/null || true
+        wait "$VLLM_PID" 2>/dev/null || true
+        log_success "vLLM остановлен"
+    }
+    trap cleanup_v3 EXIT
+
+elif [[ "$BENCH_MODE" == "v2" ]]; then
     # ===================== V2: Docker vLLM =====================
     log_step "5/6 Docker vLLM (V2)"
 
@@ -301,8 +441,8 @@ if [[ "$BENCH_MODE" == "v2" ]]; then
     GPU_VRAM_GB=$((GPU_VRAM_MB / 1024))
     TOTAL_VRAM_GB=$((GPU_VRAM_GB * GPU_COUNT))
 
-    # Qwen3-235B-FP8 требует ~320GB VRAM
-    MODEL_VRAM_REQUIRED=320
+    # Qwen3-235B-FP8 требует ~310GB VRAM
+    MODEL_VRAM_REQUIRED=310
 
     # Выбор образа: Blackwell (B200, B100, GB200) или стандартный
     if echo "$GPU_NAME" | grep -qiE '(B200|B100|GB200|B300)'; then
@@ -438,7 +578,24 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════
 log_step "6/6 Запуск бенчмарка"
 
-if [[ "$BENCH_MODE" == "v2" ]]; then
+if [[ "$BENCH_MODE" == "v3" ]]; then
+    BENCHMARK_SCRIPT="$SCRIPT_DIR/gonka_benchmark_v2.py"
+
+    if [[ ! -f "$BENCHMARK_SCRIPT" ]]; then
+        log_error "Не найден gonka_benchmark_v2.py"
+        exit 1
+    fi
+
+    log_info "Запуск V3: python3.12 gonka_benchmark_v2.py --mode-label v3 --vllm-port $VLLM_PORT ${BENCHMARK_ARGS[*]:-}"
+    echo ""
+
+    if [[ ${#BENCHMARK_ARGS[@]} -gt 0 ]]; then
+        python3.12 "$BENCHMARK_SCRIPT" --mode-label v3 --vllm-port "$VLLM_PORT" --output "$RESULTS_DIR" "${BENCHMARK_ARGS[@]}"
+    else
+        python3.12 "$BENCHMARK_SCRIPT" --mode-label v3 --vllm-port "$VLLM_PORT" --output "$RESULTS_DIR"
+    fi
+
+elif [[ "$BENCH_MODE" == "v2" ]]; then
     BENCHMARK_SCRIPT="$SCRIPT_DIR/gonka_benchmark_v2.py"
 
     if [[ ! -f "$BENCHMARK_SCRIPT" ]]; then
