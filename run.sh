@@ -395,13 +395,25 @@ if [[ "$BENCH_MODE" == "v3" ]]; then
         fi
 
         log_info "Запуск инстанса ${i}: порт ${INST_PORT}, GPU [${GPU_IDS}]"
-        CUDA_VISIBLE_DEVICES="$GPU_IDS" \
-        VLLM_USE_V1=1 VLLM_USE_CUDA_GRAPHS=0 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
-        python3.12 -m vllm.entrypoints.openai.api_server \
-            --model "$VLLM_MODEL" --host 0.0.0.0 --port "$INST_PORT" \
-            --enforce-eager --tensor-parallel-size "$TP_SIZE" \
-            --dtype float16 --max-model-len 240000 \
-            --gpu-memory-utilization 0.95 &
+        if [[ $IS_BLACKWELL -eq 1 ]]; then
+            # Blackwell: enforce-eager (CUDA graphs не работают), float16
+            CUDA_VISIBLE_DEVICES="$GPU_IDS" \
+            VLLM_USE_V1=1 VLLM_USE_CUDA_GRAPHS=0 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
+            python3.12 -m vllm.entrypoints.openai.api_server \
+                --model "$VLLM_MODEL" --host 0.0.0.0 --port "$INST_PORT" \
+                --enforce-eager --tensor-parallel-size "$TP_SIZE" \
+                --dtype float16 --max-model-len 240000 \
+                --gpu-memory-utilization 0.95 &
+        else
+            # Universal (H100/H200/A100): CUDA graphs + dtype auto
+            CUDA_VISIBLE_DEVICES="$GPU_IDS" \
+            VLLM_USE_V1=1 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
+            python3.12 -m vllm.entrypoints.openai.api_server \
+                --model "$VLLM_MODEL" --host 0.0.0.0 --port "$INST_PORT" \
+                --tensor-parallel-size "$TP_SIZE" \
+                --dtype auto --max-model-len 240000 \
+                --gpu-memory-utilization 0.95 &
+        fi
         VLLM_PIDS+=($!)
 
         if [[ -n "$VLLM_PORTS_LIST" ]]; then VLLM_PORTS_LIST="${VLLM_PORTS_LIST},"; fi

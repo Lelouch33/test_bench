@@ -297,7 +297,9 @@ class GonkaBenchmarkV2:
         k_dim: int = DEFAULT_K_DIM,
         model_id: str = DEFAULT_MODEL_ID,
         use_network_params: bool = True,
+        mode_label: str = "v2",
     ):
+        self.mode_label = mode_label
         self.batch_size = batch_size
         self.seq_len = seq_len
         self.k_dim = k_dim
@@ -671,7 +673,11 @@ class GonkaBenchmarkV2:
         # Вывод результатов
         print(f"\n{Colors.BOLD}{Colors.GREEN}", end="")
         print("\u2554" + "═" * 60 + "\u2557")
-        print("\u2551" + " " * 17 + "V2 BENCHMARK RESULTS" + " " * 23 + "\u2551")
+        mode_upper = self.mode_label.upper()
+        title = f"{mode_upper} BENCHMARK RESULTS"
+        pad_left = (60 - len(title)) // 2
+        pad_right = 60 - len(title) - pad_left
+        print("\u2551" + " " * pad_left + title + " " * pad_right + "\u2551")
         print("\u2560" + "═" * 60 + "\u2563")
         print(f"\u2551  {Colors.CYAN}total_nonces:{Colors.END}    {total_nonces:<41}\u2551")
         print(f"\u2551  {Colors.GREEN}poc_weight:{Colors.END}      {poc_weight:<41}\u2551")
@@ -690,7 +696,7 @@ class GonkaBenchmarkV2:
         # Собираем результат
         gpu_info = get_gpu_info()
         results = {
-            "mode": "v2",
+            "mode": self.mode_label,
             "total_nonces": total_nonces,
             "valid_nonces": total_nonces,
             "poc_weight": poc_weight,
@@ -798,18 +804,18 @@ def main():
         k_dim=args.k_dim or DEFAULT_K_DIM,
         model_id=args.model or DEFAULT_MODEL_ID,
         use_network_params=not args.offline,
+        mode_label=args.mode_label,
     )
 
     results = benchmark.run()
 
     if results:
-        results["mode"] = args.mode_label
         if not args.no_save:
             benchmark.save_results(results, args.output)
-        log_success("Бенчмарк V2 завершён!")
+        log_success(f"Бенчмарк {args.mode_label.upper()} завершён!")
         return 0
     else:
-        log_error("Бенчмарк V2 завершился с ошибкой")
+        log_error(f"Бенчмарк {args.mode_label.upper()} завершился с ошибкой")
         return 1
 
 
