@@ -368,13 +368,12 @@ if [[ "$BENCH_MODE" == "v3" ]]; then
     sleep 3
 
     # Запуск vLLM напрямую (в фоне)
-    # VLLM_USE_V1=0 — V0 engine, как в mlnode образе
-    log_info "Запуск vLLM 0.14.0 нативно (V0 engine)..."
-    VLLM_USE_V1=0 \
+    log_info "Запуск vLLM 0.14.0 нативно (V1 engine)..."
+    VLLM_USE_V1=1 VLLM_USE_CUDA_GRAPHS=0 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
     python3.12 -m vllm.entrypoints.openai.api_server \
         --model "$VLLM_MODEL" --host 0.0.0.0 --port "$VLLM_PORT" \
-        --tensor-parallel-size "$TP_SIZE" \
-        --dtype auto --max-model-len 240000 &
+        --enforce-eager --tensor-parallel-size "$TP_SIZE" \
+        --dtype float16 --max-model-len 240000 &
     VLLM_PID=$!
 
     log_success "vLLM запущен (PID: $VLLM_PID)"
