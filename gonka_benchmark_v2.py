@@ -316,7 +316,8 @@ class GonkaBenchmarkV2:
                 self.seq_len = self.v2_params["seq_len"]
                 self.k_dim = self.v2_params["k_dim"]
                 self.r_target = self.v2_params["r_target"]
-                self.weight_scale_factor = self.v2_params.get("weight_scale_factor", WEIGHT_SCALE_FACTOR)
+                # Всегда используем 0.262 для cPoC V2/V3 (сеть может вернуть 2.5 от V1 pow)
+                self.weight_scale_factor = WEIGHT_SCALE_FACTOR
 
                 self._print_v2_params(self.v2_params)
 
