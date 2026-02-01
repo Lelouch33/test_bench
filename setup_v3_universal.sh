@@ -242,11 +242,12 @@ fi
 # DONE
 #################################
 echo ""
-echo "╔══════════════════════════════════════════════════════════════════╗"
-echo "║     V3 SETUP COMPLETE — UNIVERSAL (H100/H200/A100)              ║"
-echo "╠══════════════════════════════════════════════════════════════════╣"
-echo "║  vLLM: ${VLLM_VERSION} + gonka_poc                                     ║"
-echo "║  Ready for: bash run.sh --mode v3                                ║"
-echo "╚══════════════════════════════════════════════════════════════════╝"
+echo "╔════════════════════════════════════════════════════════════════╗"
+echo "║  V3 SETUP COMPLETE — UNIVERSAL (H100/H200/A100)             ║"
+echo "╠════════════════════════════════════════════════════════════════╣"
+echo "║  vLLM: ${VLLM_VERSION} + gonka_poc                                  ║"
+echo "║  GPU memory utilization: 0.95                                ║"
+echo "║  Ready for: bash run.sh --mode v3                            ║"
+echo "╚════════════════════════════════════════════════════════════════╝"
 echo ""
 log_success "Setup complete!"

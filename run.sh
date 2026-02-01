@@ -400,7 +400,8 @@ if [[ "$BENCH_MODE" == "v3" ]]; then
         python3.12 -m vllm.entrypoints.openai.api_server \
             --model "$VLLM_MODEL" --host 0.0.0.0 --port "$INST_PORT" \
             --enforce-eager --tensor-parallel-size "$TP_SIZE" \
-            --dtype float16 --max-model-len 240000 &
+            --dtype float16 --max-model-len 240000 \
+            --gpu-memory-utilization 0.95 &
         VLLM_PIDS+=($!)
 
         if [[ -n "$VLLM_PORTS_LIST" ]]; then VLLM_PORTS_LIST="${VLLM_PORTS_LIST},"; fi
