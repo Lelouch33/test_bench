@@ -367,52 +367,112 @@ if [[ "$BENCH_MODE" == "v3" ]]; then
     pkill -9 -f "python.*vllm" 2>/dev/null || true
     sleep 3
 
-    # Запуск vLLM напрямую (в фоне)
-    log_info "Запуск vLLM 0.14.0 нативно (V1 engine)..."
-    VLLM_USE_V1=1 VLLM_USE_CUDA_GRAPHS=0 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
-    python3.12 -m vllm.entrypoints.openai.api_server \
-        --model "$VLLM_MODEL" --host 0.0.0.0 --port "$VLLM_PORT" \
-        --enforce-eager --tensor-parallel-size "$TP_SIZE" \
-        --dtype float16 --max-model-len 240000 &
-    VLLM_PID=$!
+    # Multi-instance: сколько инстансов можно запустить
+    INSTANCE_COUNT=$((GPU_COUNT / TP_SIZE))
+    if [[ $INSTANCE_COUNT -lt 1 ]]; then
+        INSTANCE_COUNT=1
+    fi
 
-    log_success "vLLM запущен (PID: $VLLM_PID)"
+    log_info "Multi-instance: ${INSTANCE_COUNT} инстанс(ов) (${GPU_COUNT} GPU / TP=${TP_SIZE})"
 
-    # Health check
-    log_info "Ожидание готовности vLLM (загрузка модели)..."
+    # Запуск vLLM инстансов
+    VLLM_PIDS=()
+    VLLM_PORTS_LIST=""
+    for ((i=0; i<INSTANCE_COUNT; i++)); do
+        INST_PORT=$((VLLM_PORT + i + 1))
+        START_GPU=$((i * TP_SIZE))
+        GPU_IDS=""
+        for ((g=START_GPU; g<START_GPU+TP_SIZE; g++)); do
+            if [[ -n "$GPU_IDS" ]]; then GPU_IDS="${GPU_IDS},"; fi
+            GPU_IDS="${GPU_IDS}${g}"
+        done
+
+        # Задержка между запусками инстансов (кроме первого)
+        if [[ $i -gt 0 ]]; then
+            SLEEP_TIME=$((5 * i))
+            log_info "Задержка ${SLEEP_TIME}s перед запуском инстанса ${i}..."
+            sleep "$SLEEP_TIME"
+        fi
+
+        log_info "Запуск инстанса ${i}: порт ${INST_PORT}, GPU [${GPU_IDS}]"
+        CUDA_VISIBLE_DEVICES="$GPU_IDS" \
+        VLLM_USE_V1=1 VLLM_USE_CUDA_GRAPHS=0 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
+        python3.12 -m vllm.entrypoints.openai.api_server \
+            --model "$VLLM_MODEL" --host 0.0.0.0 --port "$INST_PORT" \
+            --enforce-eager --tensor-parallel-size "$TP_SIZE" \
+            --dtype float16 --max-model-len 240000 &
+        VLLM_PIDS+=($!)
+
+        if [[ -n "$VLLM_PORTS_LIST" ]]; then VLLM_PORTS_LIST="${VLLM_PORTS_LIST},"; fi
+        VLLM_PORTS_LIST="${VLLM_PORTS_LIST}${INST_PORT}"
+    done
+
+    log_success "${INSTANCE_COUNT} vLLM инстанс(ов) запущено (порты: ${VLLM_PORTS_LIST})"
+
+    # Health check — ждём все инстансы
+    log_info "Ожидание готовности ${INSTANCE_COUNT} инстанс(ов) (таймаут 20 мин)..."
     VLLM_TIMEOUT=1200
     elapsed=0
+    READY_COUNT=0
+    declare -A READY_MAP
     while [[ $elapsed -lt $VLLM_TIMEOUT ]]; do
-        if curl -s -f -m 5 "http://127.0.0.1:${VLLM_PORT}/health" > /dev/null 2>&1; then
-            log_success "vLLM готов!"
+        READY_COUNT=0
+        for ((i=0; i<INSTANCE_COUNT; i++)); do
+            INST_PORT=$((VLLM_PORT + i + 1))
+            if [[ "${READY_MAP[$i]:-}" == "1" ]]; then
+                READY_COUNT=$((READY_COUNT + 1))
+                continue
+            fi
+            if curl -s -f -m 5 "http://127.0.0.1:${INST_PORT}/health" > /dev/null 2>&1; then
+                READY_MAP[$i]=1
+                READY_COUNT=$((READY_COUNT + 1))
+                log_success "Инстанс ${i} (порт ${INST_PORT}) готов!"
+            fi
+        done
+
+        if [[ $READY_COUNT -ge $INSTANCE_COUNT ]]; then
+            log_success "Все ${INSTANCE_COUNT} инстанс(ов) готовы!"
             break
         fi
 
-        # Проверяем что процесс ещё жив
-        if ! kill -0 "$VLLM_PID" 2>/dev/null; then
-            log_error "vLLM процесс завершился!"
+        # Проверяем что процессы живы
+        ALL_ALIVE=1
+        for ((i=0; i<INSTANCE_COUNT; i++)); do
+            if ! kill -0 "${VLLM_PIDS[$i]}" 2>/dev/null; then
+                if [[ "${READY_MAP[$i]:-}" != "1" ]]; then
+                    log_error "vLLM инстанс ${i} (PID: ${VLLM_PIDS[$i]}) завершился!"
+                    ALL_ALIVE=0
+                fi
+            fi
+        done
+        if [[ $ALL_ALIVE -eq 0 ]] && [[ $READY_COUNT -eq 0 ]]; then
+            log_error "Все инстансы завершились без готовности"
             exit 1
         fi
 
-        echo -ne "  ... ожидание ${elapsed}s / ${VLLM_TIMEOUT}s\r"
+        echo -ne "  ... ожидание ${elapsed}s / ${VLLM_TIMEOUT}s (${READY_COUNT}/${INSTANCE_COUNT} ready)\r"
         sleep 10
         elapsed=$((elapsed + 10))
     done
     echo ""
 
-    if [[ $elapsed -ge $VLLM_TIMEOUT ]]; then
-        log_error "vLLM не стал доступен за ${VLLM_TIMEOUT}s"
-        kill "$VLLM_PID" 2>/dev/null || true
+    if [[ $READY_COUNT -lt $INSTANCE_COUNT ]]; then
+        log_error "Не все инстансы стали доступны за ${VLLM_TIMEOUT}s (${READY_COUNT}/${INSTANCE_COUNT})"
+        for pid in "${VLLM_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
         exit 1
     fi
 
     # Функция очистки при выходе
     cleanup_v3() {
         echo ""
-        log_info "Останавливаем vLLM процесс (PID: $VLLM_PID)..."
-        kill "$VLLM_PID" 2>/dev/null || true
-        wait "$VLLM_PID" 2>/dev/null || true
-        log_success "vLLM остановлен"
+        log_info "Останавливаем ${#VLLM_PIDS[@]} vLLM инстанс(ов)..."
+        for pid in "${VLLM_PIDS[@]}"; do
+            kill "$pid" 2>/dev/null || true
+        done
+        for pid in "${VLLM_PIDS[@]}"; do
+            wait "$pid" 2>/dev/null || true
+        done
+        log_success "Все vLLM инстансы остановлены"
     }
     trap cleanup_v3 EXIT
 
@@ -426,13 +486,13 @@ elif [[ "$BENCH_MODE" == "v2" ]]; then
     fi
     log_success "Docker: $(docker --version | head -1)"
 
-    # Проверяем/останавливаем старый контейнер
-    if docker ps -a --format '{{.Names}}' | grep -q "^${VLLM_CONTAINER_NAME}$"; then
-        log_info "Останавливаем старый контейнер..."
-        docker stop "$VLLM_CONTAINER_NAME" 2>/dev/null || true
-        docker rm "$VLLM_CONTAINER_NAME" 2>/dev/null || true
-        sleep 2
-    fi
+    # Проверяем/останавливаем старые контейнеры
+    for old_c in $(docker ps -a --format '{{.Names}}' | grep "^${VLLM_CONTAINER_NAME}"); do
+        log_info "Останавливаем старый контейнер: $old_c"
+        docker stop "$old_c" 2>/dev/null || true
+        docker rm "$old_c" 2>/dev/null || true
+    done
+    sleep 2
 
     # Определяем количество GPU и VRAM для автоподбора tensor-parallel-size
     GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l || echo "1")
@@ -489,65 +549,112 @@ elif [[ "$BENCH_MODE" == "v2" ]]; then
     fi
     log_success "Образ vLLM готов"
 
-    # Запускаем контейнер
+    # Multi-instance: сколько инстансов можно запустить
+    INSTANCE_COUNT=$((GPU_COUNT / TP_SIZE))
+    if [[ $INSTANCE_COUNT -lt 1 ]]; then
+        INSTANCE_COUNT=1
+    fi
+
+    log_info "Multi-instance: ${INSTANCE_COUNT} контейнер(ов) (${GPU_COUNT} GPU / TP=${TP_SIZE})"
+
+    # Запускаем контейнеры
     # VLLM_USE_V1=0 — V0 engine, как в mlnode образе
-    log_info "Запуск vLLM контейнера (V0 engine)..."
-    docker run -d \
-        --name "$VLLM_CONTAINER_NAME" \
-        --gpus all \
-        --shm-size=32g \
-        -p "${VLLM_PORT}:${VLLM_PORT}" \
-        -v "$HOME/.cache:/root/.cache" \
-        -e VLLM_USE_V1=0 \
-        "$VLLM_IMAGE" \
-        --model "$VLLM_MODEL" \
-        --host 0.0.0.0 \
-        --port "$VLLM_PORT" \
-        --tensor-parallel-size "$TP_SIZE" \
-        --dtype auto \
-        --max-model-len 240000
+    V2_CONTAINER_NAMES=()
+    VLLM_PORTS_LIST=""
+    for ((i=0; i<INSTANCE_COUNT; i++)); do
+        INST_PORT=$((VLLM_PORT + i + 1))
+        CONT_NAME="${VLLM_CONTAINER_NAME}-${i}"
+        START_GPU=$((i * TP_SIZE))
+        GPU_IDS=""
+        for ((g=START_GPU; g<START_GPU+TP_SIZE; g++)); do
+            if [[ -n "$GPU_IDS" ]]; then GPU_IDS="${GPU_IDS},"; fi
+            GPU_IDS="${GPU_IDS}${g}"
+        done
 
-    log_success "Контейнер запущен: $VLLM_CONTAINER_NAME"
+        log_info "Запуск контейнера ${i}: порт ${INST_PORT}, GPU [${GPU_IDS}]"
+        docker run -d \
+            --name "$CONT_NAME" \
+            --gpus "\"device=${GPU_IDS}\"" \
+            --shm-size=32g \
+            -p "${INST_PORT}:${INST_PORT}" \
+            -v "$HOME/.cache:/root/.cache" \
+            -e VLLM_USE_V1=0 \
+            "$VLLM_IMAGE" \
+            --model "$VLLM_MODEL" \
+            --host 0.0.0.0 \
+            --port "$INST_PORT" \
+            --tensor-parallel-size "$TP_SIZE" \
+            --dtype auto \
+            --max-model-len 240000
 
-    # Ожидаем health check
-    log_info "Ожидание готовности vLLM (загрузка модели, таймаут 20 мин)..."
+        V2_CONTAINER_NAMES+=("$CONT_NAME")
+        if [[ -n "$VLLM_PORTS_LIST" ]]; then VLLM_PORTS_LIST="${VLLM_PORTS_LIST},"; fi
+        VLLM_PORTS_LIST="${VLLM_PORTS_LIST}${INST_PORT}"
+    done
+
+    log_success "${INSTANCE_COUNT} контейнер(ов) запущено (порты: ${VLLM_PORTS_LIST})"
+
+    # Ожидаем health check — все инстансы
+    log_info "Ожидание готовности ${INSTANCE_COUNT} контейнер(ов) (таймаут 20 мин)..."
     VLLM_TIMEOUT=1200
     elapsed=0
+    READY_COUNT=0
+    declare -A V2_READY_MAP
     while [[ $elapsed -lt $VLLM_TIMEOUT ]]; do
-        if curl -s -f -m 5 "http://127.0.0.1:${VLLM_PORT}/health" > /dev/null 2>&1; then
-            log_success "vLLM готов!"
+        READY_COUNT=0
+        for ((i=0; i<INSTANCE_COUNT; i++)); do
+            INST_PORT=$((VLLM_PORT + i + 1))
+            if [[ "${V2_READY_MAP[$i]:-}" == "1" ]]; then
+                READY_COUNT=$((READY_COUNT + 1))
+                continue
+            fi
+            if curl -s -f -m 5 "http://127.0.0.1:${INST_PORT}/health" > /dev/null 2>&1; then
+                V2_READY_MAP[$i]=1
+                READY_COUNT=$((READY_COUNT + 1))
+                log_success "Контейнер ${i} (порт ${INST_PORT}) готов!"
+            fi
+        done
+
+        if [[ $READY_COUNT -ge $INSTANCE_COUNT ]]; then
+            log_success "Все ${INSTANCE_COUNT} контейнер(ов) готовы!"
             break
         fi
 
-        # Проверяем что контейнер ещё жив
-        if ! docker ps --format '{{.Names}}' | grep -q "^${VLLM_CONTAINER_NAME}$"; then
-            log_error "Контейнер остановился! Логи:"
-            docker logs --tail 50 "$VLLM_CONTAINER_NAME" 2>&1 || true
-            exit 1
-        fi
+        # Проверяем что контейнеры живы
+        for ((i=0; i<INSTANCE_COUNT; i++)); do
+            CONT_NAME="${V2_CONTAINER_NAMES[$i]}"
+            if [[ "${V2_READY_MAP[$i]:-}" != "1" ]]; then
+                if ! docker ps --format '{{.Names}}' | grep -q "^${CONT_NAME}$"; then
+                    log_error "Контейнер ${CONT_NAME} остановился! Логи:"
+                    docker logs --tail 30 "$CONT_NAME" 2>&1 || true
+                fi
+            fi
+        done
 
-        echo -ne "  ... ожидание ${elapsed}s / ${VLLM_TIMEOUT}s\r"
+        echo -ne "  ... ожидание ${elapsed}s / ${VLLM_TIMEOUT}s (${READY_COUNT}/${INSTANCE_COUNT} ready)\r"
         sleep 10
         elapsed=$((elapsed + 10))
     done
     echo ""
 
-    if [[ $elapsed -ge $VLLM_TIMEOUT ]]; then
-        log_error "vLLM не стал доступен за ${VLLM_TIMEOUT}s"
-        log_info "Логи контейнера:"
-        docker logs --tail 30 "$VLLM_CONTAINER_NAME" 2>&1 || true
-        docker stop "$VLLM_CONTAINER_NAME" 2>/dev/null || true
-        docker rm "$VLLM_CONTAINER_NAME" 2>/dev/null || true
+    if [[ $READY_COUNT -lt $INSTANCE_COUNT ]]; then
+        log_error "Не все контейнеры стали доступны за ${VLLM_TIMEOUT}s (${READY_COUNT}/${INSTANCE_COUNT})"
+        for cn in "${V2_CONTAINER_NAMES[@]}"; do
+            docker stop "$cn" 2>/dev/null || true
+            docker rm "$cn" 2>/dev/null || true
+        done
         exit 1
     fi
 
     # Функция очистки при выходе
     cleanup_v2() {
         echo ""
-        log_info "Останавливаем vLLM контейнер..."
-        docker stop "$VLLM_CONTAINER_NAME" 2>/dev/null || true
-        docker rm "$VLLM_CONTAINER_NAME" 2>/dev/null || true
-        log_success "Контейнер остановлен"
+        log_info "Останавливаем ${#V2_CONTAINER_NAMES[@]} vLLM контейнер(ов)..."
+        for cn in "${V2_CONTAINER_NAMES[@]}"; do
+            docker stop "$cn" 2>/dev/null || true
+            docker rm "$cn" 2>/dev/null || true
+        done
+        log_success "Все контейнеры остановлены"
     }
     trap cleanup_v2 EXIT
 
@@ -584,13 +691,13 @@ if [[ "$BENCH_MODE" == "v3" ]]; then
         exit 1
     fi
 
-    log_info "Запуск V3: python3.12 gonka_benchmark_v2.py --mode-label v3 --vllm-port $VLLM_PORT ${BENCHMARK_ARGS[*]:-}"
+    log_info "Запуск V3: python3.12 gonka_benchmark_v2.py --mode-label v3 --vllm-ports $VLLM_PORTS_LIST ${BENCHMARK_ARGS[*]:-}"
     echo ""
 
     if [[ ${#BENCHMARK_ARGS[@]} -gt 0 ]]; then
-        python3.12 "$BENCHMARK_SCRIPT" --mode-label v3 --vllm-port "$VLLM_PORT" --output "$RESULTS_DIR" "${BENCHMARK_ARGS[@]}"
+        python3.12 "$BENCHMARK_SCRIPT" --mode-label v3 --vllm-ports "$VLLM_PORTS_LIST" --output "$RESULTS_DIR" "${BENCHMARK_ARGS[@]}"
     else
-        python3.12 "$BENCHMARK_SCRIPT" --mode-label v3 --vllm-port "$VLLM_PORT" --output "$RESULTS_DIR"
+        python3.12 "$BENCHMARK_SCRIPT" --mode-label v3 --vllm-ports "$VLLM_PORTS_LIST" --output "$RESULTS_DIR"
     fi
 
 elif [[ "$BENCH_MODE" == "v2" ]]; then
@@ -601,13 +708,13 @@ elif [[ "$BENCH_MODE" == "v2" ]]; then
         exit 1
     fi
 
-    log_info "Запуск V2: python3 gonka_benchmark_v2.py --vllm-port $VLLM_PORT ${BENCHMARK_ARGS[*]:-}"
+    log_info "Запуск V2: python3 gonka_benchmark_v2.py --vllm-ports $VLLM_PORTS_LIST ${BENCHMARK_ARGS[*]:-}"
     echo ""
 
     if [[ ${#BENCHMARK_ARGS[@]} -gt 0 ]]; then
-        python3 "$BENCHMARK_SCRIPT" --vllm-port "$VLLM_PORT" --output "$RESULTS_DIR" "${BENCHMARK_ARGS[@]}"
+        python3 "$BENCHMARK_SCRIPT" --vllm-ports "$VLLM_PORTS_LIST" --output "$RESULTS_DIR" "${BENCHMARK_ARGS[@]}"
     else
-        python3 "$BENCHMARK_SCRIPT" --vllm-port "$VLLM_PORT" --output "$RESULTS_DIR"
+        python3 "$BENCHMARK_SCRIPT" --vllm-ports "$VLLM_PORTS_LIST" --output "$RESULTS_DIR"
     fi
 else
     BENCHMARK_SCRIPT="$SCRIPT_DIR/gonka_benchmark.py"

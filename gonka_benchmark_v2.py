@@ -290,6 +290,7 @@ class GonkaBenchmarkV2:
     def __init__(
         self,
         vllm_url: str = None,
+        vllm_urls: list = None,
         duration_min: float = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
         seq_len: int = DEFAULT_SEQ_LEN,
@@ -335,11 +336,22 @@ class GonkaBenchmarkV2:
             self.duration_sec = DEFAULT_DURATION_MIN * 60
             log_info(f"Используем default длительность: {DEFAULT_DURATION_MIN} мин")
 
-        # URL vLLM сервера
-        if vllm_url:
-            self.vllm_url = vllm_url.rstrip("/")
+        # URL vLLM серверов (multi-instance)
+        if vllm_urls and len(vllm_urls) > 0:
+            self.vllm_urls = [u.rstrip("/") for u in vllm_urls]
+        elif vllm_url:
+            self.vllm_urls = [vllm_url.rstrip("/")]
         else:
-            self.vllm_url = f"http://localhost:{DEFAULT_VLLM_PORT}"
+            self.vllm_urls = [f"http://localhost:{DEFAULT_VLLM_PORT}"]
+
+        # Обратная совместимость
+        self.vllm_url = self.vllm_urls[0]
+        self.n_instances = len(self.vllm_urls)
+
+        if self.n_instances > 1:
+            log_info(f"Multi-instance: {self.n_instances} бэкендов")
+            for i, url in enumerate(self.vllm_urls):
+                log_info(f"  instance {i}: {url}")
 
         # Тестовые данные
         self.block_hash = hashlib.sha256(b"gonka_benchmark_v2").hexdigest()
@@ -395,7 +407,10 @@ class GonkaBenchmarkV2:
         gpu_line = f"\u2551  GPU: {num_gpus}x {gpu_name}"
         print(gpu_line + " " * (63 - 2 - len(gpu_line)) + "\u2551")
 
-        vllm_line = f"\u2551  vLLM: {self.vllm_url}"
+        if self.n_instances > 1:
+            vllm_line = f"\u2551  vLLM: {self.n_instances} instances ({self.vllm_urls[0]}...)"
+        else:
+            vllm_line = f"\u2551  vLLM: {self.vllm_url}"
         print(vllm_line + " " * (63 - 2 - len(vllm_line)) + "\u2551")
 
         model_line = f"\u2551  Model: {self.model_id}"
@@ -413,84 +428,124 @@ class GonkaBenchmarkV2:
         print(f"{Colors.END}")
 
     def _wait_for_vllm(self, timeout: int = 300) -> bool:
-        """Ждёт пока vLLM станет доступен."""
+        """Ждёт пока все vLLM инстансы станут доступны."""
         import httpx
-        log_info(f"Ожидание vLLM сервера на {self.vllm_url}...")
+        log_info(f"Ожидание {self.n_instances} vLLM инстанс(ов)...")
         start = time.time()
+        ready = set()
         while time.time() - start < timeout:
-            try:
-                with httpx.Client(timeout=5) as client:
-                    resp = client.get(f"{self.vllm_url}/health")
-                    if resp.status_code == 200:
-                        log_success("vLLM сервер доступен!")
-                        return True
-            except Exception:
-                pass
+            for i, url in enumerate(self.vllm_urls):
+                if i in ready:
+                    continue
+                try:
+                    with httpx.Client(timeout=5) as client:
+                        resp = client.get(f"{url}/health")
+                        if resp.status_code == 200:
+                            ready.add(i)
+                            log_success(f"vLLM инстанс {i} доступен: {url}")
+                except Exception:
+                    pass
+            if len(ready) == self.n_instances:
+                log_success(f"Все {self.n_instances} инстанс(ов) доступны!")
+                return True
             time.sleep(5)
             elapsed = int(time.time() - start)
-            print(f"  ... ожидание {elapsed}s / {timeout}s", end="\r")
+            print(f"  ... ожидание {elapsed}s / {timeout}s ({len(ready)}/{self.n_instances} ready)", end="\r")
 
-        log_error(f"vLLM сервер не стал доступен за {timeout}s")
+        log_error(f"Не все vLLM инстансы стали доступны за {timeout}s ({len(ready)}/{self.n_instances})")
         return False
 
     def _start_generation(self) -> bool:
-        """Отправляет запрос на начало генерации."""
+        """Отправляет запрос на начало генерации на все инстансы."""
         import httpx
 
-        payload = {
-            "block_hash": self.block_hash,
-            "block_height": self.block_height,
-            "public_key": self.public_key,
-            "node_id": 0,
-            "node_count": 1,
-            "group_id": 0,
-            "n_groups": 1,
-            "batch_size": self.batch_size,
-            "params": {
-                "model": self.model_id,
-                "seq_len": self.seq_len,
-                "k_dim": self.k_dim,
+        ok_count = 0
+        for i, url in enumerate(self.vllm_urls):
+            payload = {
+                "block_hash": self.block_hash,
+                "block_height": self.block_height,
+                "public_key": self.public_key,
+                "node_id": 0,
+                "node_count": 1,
+                "group_id": i,
+                "n_groups": self.n_instances,
+                "batch_size": self.batch_size,
+                "params": {
+                    "model": self.model_id,
+                    "seq_len": self.seq_len,
+                    "k_dim": self.k_dim,
+                },
+            }
+
+            try:
+                with httpx.Client(timeout=30) as client:
+                    resp = client.post(f"{url}/api/v1/pow/init/generate", json=payload)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        log_success(f"Генерация запущена на инстансе {i}: {data}")
+                        ok_count += 1
+                    else:
+                        log_error(f"Ошибка запуска на инстансе {i}: HTTP {resp.status_code} - {resp.text}")
+            except Exception as e:
+                log_error(f"Ошибка подключения к инстансу {i} ({url}): {e}")
+
+        if ok_count == 0:
+            log_error("Не удалось запустить генерацию ни на одном инстансе")
+            return False
+        if ok_count < self.n_instances:
+            log_warning(f"Генерация запущена на {ok_count}/{self.n_instances} инстансах")
+        return True
+
+    def _poll_status(self) -> Optional[Dict]:
+        """Опрашивает /api/v1/pow/status со всех инстансов и агрегирует."""
+        import httpx
+        total_processed = 0
+        total_nonces_per_sec = 0.0
+        any_generating = False
+        any_response = False
+
+        for url in self.vllm_urls:
+            try:
+                with httpx.Client(timeout=10) as client:
+                    resp = client.get(f"{url}/api/v1/pow/status")
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        any_response = True
+                        if data.get("status") == "GENERATING":
+                            any_generating = True
+                        stats = data.get("stats", {})
+                        total_processed += stats.get("total_processed", 0)
+                        total_nonces_per_sec += stats.get("nonces_per_second", 0)
+            except Exception:
+                pass
+
+        if not any_response:
+            return None
+
+        return {
+            "status": "GENERATING" if any_generating else "IDLE",
+            "stats": {
+                "total_processed": total_processed,
+                "nonces_per_second": total_nonces_per_sec,
             },
         }
 
-        try:
-            with httpx.Client(timeout=30) as client:
-                resp = client.post(f"{self.vllm_url}/api/v1/pow/init/generate", json=payload)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    log_success(f"Генерация запущена: {data}")
-                    return True
-                else:
-                    log_error(f"Ошибка запуска генерации: HTTP {resp.status_code} - {resp.text}")
-                    return False
-        except Exception as e:
-            log_error(f"Ошибка подключения к vLLM: {e}")
-            return False
-
-    def _poll_status(self) -> Optional[Dict]:
-        """Опрашивает /api/v1/pow/status."""
-        import httpx
-        try:
-            with httpx.Client(timeout=10) as client:
-                resp = client.get(f"{self.vllm_url}/api/v1/pow/status")
-                if resp.status_code == 200:
-                    return resp.json()
-        except Exception:
-            pass
-        return None
-
     def _stop_generation(self):
-        """Останавливает генерацию."""
+        """Останавливает генерацию на всех инстансах."""
         import httpx
-        try:
-            with httpx.Client(timeout=10) as client:
-                resp = client.post(f"{self.vllm_url}/api/v1/pow/stop")
-                if resp.status_code == 200:
-                    log_success("Генерация остановлена")
-                else:
-                    log_warning(f"Остановка: HTTP {resp.status_code}")
-        except Exception as e:
-            log_warning(f"Ошибка при остановке: {e}")
+        for i, url in enumerate(self.vllm_urls):
+            try:
+                with httpx.Client(timeout=10) as client:
+                    resp = client.post(f"{url}/api/v1/pow/stop")
+                    if resp.status_code == 200:
+                        if self.n_instances > 1:
+                            log_success(f"Генерация остановлена на инстансе {i}")
+                        else:
+                            log_success("Генерация остановлена")
+                    else:
+                        log_warning(f"Остановка инстанса {i}: HTTP {resp.status_code}")
+            except Exception as e:
+                log_warning(f"Ошибка при остановке инстанса {i}: {e}")
 
     def run(self) -> Optional[Dict]:
         """Запускает V2 бенчмарк."""
@@ -649,6 +704,8 @@ class GonkaBenchmarkV2:
             "model_id": self.model_id,
             "r_target": self.r_target,
             "vllm_url": self.vllm_url,
+            "vllm_urls": self.vllm_urls,
+            "n_instances": self.n_instances,
             "weight_scale_factor": self.weight_scale_factor,
             "timestamp": datetime.now().isoformat(),
             "gpu": gpu_info,
@@ -697,6 +754,8 @@ def main():
                         help=f"URL vLLM сервера (по умолчанию: http://localhost:{DEFAULT_VLLM_PORT})")
     parser.add_argument("--vllm-port", type=int, default=None,
                         help=f"Порт vLLM сервера (по умолчанию: {DEFAULT_VLLM_PORT})")
+    parser.add_argument("--vllm-ports", type=str, default=None,
+                        help="Порты нескольких vLLM инстансов через запятую (например: 5001,5002)")
     parser.add_argument("--duration", "-d", type=float, default=None,
                         help=f"Время теста в минутах (по умолчанию: из сети или {DEFAULT_DURATION_MIN})")
     parser.add_argument("--batch-size", "-b", type=int, default=DEFAULT_BATCH_SIZE,
@@ -718,13 +777,20 @@ def main():
 
     args = parser.parse_args()
 
-    # Определяем URL
+    # Определяем URL(s)
     vllm_url = args.vllm_url
-    if vllm_url is None and args.vllm_port is not None:
+    vllm_urls = None
+
+    if args.vllm_ports:
+        # Multi-instance: --vllm-ports 5001,5002,5003
+        ports = [int(p.strip()) for p in args.vllm_ports.split(",")]
+        vllm_urls = [f"http://localhost:{p}" for p in ports]
+    elif vllm_url is None and args.vllm_port is not None:
         vllm_url = f"http://localhost:{args.vllm_port}"
 
     benchmark = GonkaBenchmarkV2(
         vllm_url=vllm_url,
+        vllm_urls=vllm_urls,
         duration_min=args.duration,
         batch_size=args.batch_size,
         seq_len=args.seq_len or DEFAULT_SEQ_LEN,
