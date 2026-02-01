@@ -368,19 +368,20 @@ if [[ "$BENCH_MODE" == "v3" ]]; then
     sleep 3
 
     # Запуск vLLM напрямую (в фоне)
-    log_info "Запуск vLLM 0.14.0 нативно..."
-    VLLM_USE_V1=1 VLLM_USE_CUDA_GRAPHS=0 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
+    # VLLM_USE_V1=0 — V0 engine, как в mlnode образе
+    log_info "Запуск vLLM 0.14.0 нативно (V0 engine)..."
+    VLLM_USE_V1=0 \
     python3.12 -m vllm.entrypoints.openai.api_server \
         --model "$VLLM_MODEL" --host 0.0.0.0 --port "$VLLM_PORT" \
-        --enforce-eager --tensor-parallel-size "$TP_SIZE" \
-        --dtype float16 --max-model-len 240000 &
+        --tensor-parallel-size "$TP_SIZE" \
+        --dtype auto --max-model-len 240000 &
     VLLM_PID=$!
 
     log_success "vLLM запущен (PID: $VLLM_PID)"
 
     # Health check
     log_info "Ожидание готовности vLLM (загрузка модели)..."
-    VLLM_TIMEOUT=600
+    VLLM_TIMEOUT=1200
     elapsed=0
     while [[ $elapsed -lt $VLLM_TIMEOUT ]]; do
         if curl -s -f -m 5 "http://127.0.0.1:${VLLM_PORT}/health" > /dev/null 2>&1; then
@@ -490,30 +491,28 @@ elif [[ "$BENCH_MODE" == "v2" ]]; then
     log_success "Образ vLLM готов"
 
     # Запускаем контейнер
-    log_info "Запуск vLLM контейнера..."
+    # VLLM_USE_V1=0 — V0 engine, как в mlnode образе
+    log_info "Запуск vLLM контейнера (V0 engine)..."
     docker run -d \
         --name "$VLLM_CONTAINER_NAME" \
         --gpus all \
         --shm-size=32g \
         -p "${VLLM_PORT}:${VLLM_PORT}" \
         -v "$HOME/.cache:/root/.cache" \
-        -e VLLM_USE_V1=1 \
-        -e VLLM_USE_CUDA_GRAPHS=0 \
-        -e VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
+        -e VLLM_USE_V1=0 \
         "$VLLM_IMAGE" \
         --model "$VLLM_MODEL" \
         --host 0.0.0.0 \
         --port "$VLLM_PORT" \
-        --enforce-eager \
         --tensor-parallel-size "$TP_SIZE" \
-        --dtype float16 \
+        --dtype auto \
         --max-model-len 240000
 
     log_success "Контейнер запущен: $VLLM_CONTAINER_NAME"
 
     # Ожидаем health check
-    log_info "Ожидание готовности vLLM (загрузка модели)..."
-    VLLM_TIMEOUT=600
+    log_info "Ожидание готовности vLLM (загрузка модели, таймаут 20 мин)..."
+    VLLM_TIMEOUT=1200
     elapsed=0
     while [[ $elapsed -lt $VLLM_TIMEOUT ]]; do
         if curl -s -f -m 5 "http://127.0.0.1:${VLLM_PORT}/health" > /dev/null 2>&1; then
