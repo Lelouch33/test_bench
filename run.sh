@@ -26,7 +26,9 @@ GONKA_PATH="$SCRIPT_DIR/gonka"
 RESULTS_DIR="$SCRIPT_DIR/results"
 
 # V2 Docker конфигурация
-VLLM_IMAGE="ghcr.io/gonka-ai/vllm:v0.9.1-poc-v2-post1-blackwell"
+VLLM_IMAGE_DEFAULT="ghcr.io/gonka-ai/vllm:v0.9.1-poc-v2-post1"
+VLLM_IMAGE_BLACKWELL="ghcr.io/gonka-ai/vllm:v0.9.1-poc-v2-post1-blackwell"
+VLLM_IMAGE=""  # определяется после детекции GPU
 VLLM_CONTAINER_NAME="gonka-benchmark-vllm"
 VLLM_PORT=5000
 VLLM_MODEL="Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
@@ -101,7 +103,7 @@ if [[ "$BENCH_MODE" == "v2" ]]; then
     echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}${BOLD}║         Gonka PoC V2 Benchmark - All-in-One v1.0                 ║${NC}"
     echo -e "${CYAN}${BOLD}║         Mode: V2 (cPoC via vLLM API)                             ║${NC}"
-    echo -e "${CYAN}${BOLD}║  Формула: poc_weight = total_nonces × 2.5                        ║${NC}"
+    echo -e "${CYAN}${BOLD}║  Формула: poc_weight = total_nonces × WeightScaleFactor           ║${NC}"
     echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════════╝${NC}"
 else
     echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════════════════╗${NC}"
@@ -301,6 +303,15 @@ if [[ "$BENCH_MODE" == "v2" ]]; then
 
     # Qwen3-235B-FP8 требует ~320GB VRAM
     MODEL_VRAM_REQUIRED=320
+
+    # Выбор образа: Blackwell (B200, B100, GB200) или стандартный
+    if echo "$GPU_NAME" | grep -qiE '(B200|B100|GB200|B300)'; then
+        VLLM_IMAGE="$VLLM_IMAGE_BLACKWELL"
+        log_info "GPU: ${GPU_COUNT}× ${GPU_NAME} — Blackwell, образ: blackwell"
+    else
+        VLLM_IMAGE="$VLLM_IMAGE_DEFAULT"
+        log_info "GPU: ${GPU_COUNT}× ${GPU_NAME} — образ: default"
+    fi
 
     log_info "GPU: ${GPU_COUNT}× ${GPU_NAME} (${GPU_VRAM_GB}GB каждая, ${TOTAL_VRAM_GB}GB всего)"
 

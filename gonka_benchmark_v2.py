@@ -9,7 +9,7 @@ V2 использует реальный vLLM сервер с gonka_poc моду
 для подсчёта скорости генерации артефактов.
 
 ФОРМУЛА РАСЧЁТА ВЕСА:
-  poc_weight = total_nonces × WeightScaleFactor (2.5)
+  poc_weight = total_nonces × WeightScaleFactor (0.262)
 """
 
 import os
@@ -25,7 +25,7 @@ from typing import Dict, Any, Optional, Tuple
 
 # ============ КОНФИГУРАЦИЯ ============
 DEFAULT_DURATION_MIN = 5
-WEIGHT_SCALE_FACTOR = 2.5
+WEIGHT_SCALE_FACTOR = 0.262
 DEFAULT_VLLM_PORT = 5000
 DEFAULT_BATCH_SIZE = 32
 DEFAULT_SEQ_LEN = 1024
@@ -133,6 +133,9 @@ def fetch_v2_params_from_network(timeout: float = 5.0) -> Optional[Dict[str, Any
                     p_mismatch = parse_exp_value(stat_test.get("p_mismatch"), 0.1)
                     p_value_threshold = parse_exp_value(stat_test.get("p_value_threshold"), 0.05)
 
+                    # weight параметры
+                    weight_scale_factor = parse_exp_value(poc_params.get("weight_scale_factor"), WEIGHT_SCALE_FACTOR)
+
                     # confirmation_poc_params
                     cpoc_params = params.get("confirmation_poc_params", {})
                     expected_confirmations = int(cpoc_params.get("expected_confirmations_per_epoch", 4))
@@ -140,12 +143,12 @@ def fetch_v2_params_from_network(timeout: float = 5.0) -> Optional[Dict[str, Any
                     # epoch_params для длительности
                     epoch_params = params.get("epoch_params", {})
                     poc_stage_duration = int(epoch_params.get("poc_stage_duration", 60))
-
                     result = {
                         "model_id": model_id,
                         "seq_len": seq_len,
                         "k_dim": DEFAULT_K_DIM,
                         "r_target": r_target,
+                        "weight_scale_factor": weight_scale_factor,
                         "confirmation_poc_v2_enabled": poc_params.get("confirmation_poc_v2_enabled", False),
                         "poc_v2_enabled": poc_params.get("poc_v2_enabled", False),
                         "stat_test": {
@@ -299,6 +302,7 @@ class GonkaBenchmarkV2:
         self.k_dim = k_dim
         self.model_id = model_id
         self.r_target = DEFAULT_R_TARGET
+        self.weight_scale_factor = WEIGHT_SCALE_FACTOR
 
         # Получаем параметры из сети
         self.v2_params = None
@@ -311,6 +315,7 @@ class GonkaBenchmarkV2:
                 self.seq_len = self.v2_params["seq_len"]
                 self.k_dim = self.v2_params["k_dim"]
                 self.r_target = self.v2_params["r_target"]
+                self.weight_scale_factor = self.v2_params.get("weight_scale_factor", WEIGHT_SCALE_FACTOR)
 
                 self._print_v2_params(self.v2_params)
 
@@ -352,6 +357,10 @@ class GonkaBenchmarkV2:
         print(f"{Colors.CYAN}\u2551{Colors.END}    seq_len:             {str(params['seq_len']):<{W - 26}}{Colors.CYAN}\u2551{Colors.END}")
         print(f"{Colors.CYAN}\u2551{Colors.END}    k_dim:               {str(params['k_dim']):<{W - 26}}{Colors.CYAN}\u2551{Colors.END}")
         print(f"{Colors.CYAN}\u2551{Colors.END}    r_target:            {str(params['r_target']):<{W - 26}}{Colors.CYAN}\u2551{Colors.END}")
+        print(f"{Colors.CYAN}\u2560{'═' * W}\u2563{Colors.END}")
+        wsf = str(params.get('weight_scale_factor', WEIGHT_SCALE_FACTOR))
+        print(f"{Colors.CYAN}\u2551{Colors.END}  {Colors.GREEN}Weight:{Colors.END}{' ' * (W - 10)}{Colors.CYAN}\u2551{Colors.END}")
+        print(f"{Colors.CYAN}\u2551{Colors.END}    WeightScaleFactor:   {wsf:<{W - 26}}{Colors.CYAN}\u2551{Colors.END}")
         print(f"{Colors.CYAN}\u2560{'═' * W}\u2563{Colors.END}")
         print(f"{Colors.CYAN}\u2551{Colors.END}  {Colors.GREEN}Flags:{Colors.END}{' ' * (W - 9)}{Colors.CYAN}\u2551{Colors.END}")
         cpoc_str = str(params.get('confirmation_poc_v2_enabled', False))
@@ -562,7 +571,7 @@ class GonkaBenchmarkV2:
                 if current_time - last_report_time >= REPORT_INTERVAL:
                     elapsed = current_time - start_time
                     elapsed_min = elapsed / 60
-                    poc_weight = int(total_nonces * WEIGHT_SCALE_FACTOR)
+                    poc_weight = int(total_nonces * self.weight_scale_factor)
 
                     # Мгновенная скорость (за последний интервал)
                     delta_nonces = total_nonces - last_nonces
@@ -601,7 +610,7 @@ class GonkaBenchmarkV2:
         # Результаты
         elapsed_min = (time.time() - start_time) / 60
         nonces_per_min = total_nonces / elapsed_min if elapsed_min > 0 else 0
-        poc_weight = int(total_nonces * WEIGHT_SCALE_FACTOR)
+        poc_weight = int(total_nonces * self.weight_scale_factor)
 
         # Вывод результатов
         print(f"\n{Colors.BOLD}{Colors.GREEN}", end="")
@@ -619,8 +628,8 @@ class GonkaBenchmarkV2:
         print(f"\u2551  {Colors.CYAN}vllm_url:{Colors.END}        {self.vllm_url:<41}\u2551")
         print("\u255a" + "═" * 60 + "\u255d")
         print(f"{Colors.END}")
-        print(f"{Colors.YELLOW}Формула:{Colors.END} poc_weight = total_nonces \u00d7 {WEIGHT_SCALE_FACTOR}")
-        print(f"         (из chainvalidation.go WeightScaleFactor)\n")
+        print(f"{Colors.YELLOW}Формула:{Colors.END} poc_weight = total_nonces \u00d7 {self.weight_scale_factor}")
+        print(f"         (WeightScaleFactor из сети)\n")
 
         # Собираем результат
         gpu_info = get_gpu_info()
@@ -640,7 +649,7 @@ class GonkaBenchmarkV2:
             "model_id": self.model_id,
             "r_target": self.r_target,
             "vllm_url": self.vllm_url,
-            "weight_scale_factor": WEIGHT_SCALE_FACTOR,
+            "weight_scale_factor": self.weight_scale_factor,
             "timestamp": datetime.now().isoformat(),
             "gpu": gpu_info,
             "v2_params": self.v2_params,
@@ -679,7 +688,7 @@ def main():
   python3 gonka_benchmark_v2.py --duration 3
   python3 gonka_benchmark_v2.py --batch-size 64 --seq-len 1024
 
-Формула: poc_weight = total_nonces × 2.5
+Формула: poc_weight = total_nonces × 0.262
         """
     )
 
