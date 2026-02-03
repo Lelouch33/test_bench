@@ -403,7 +403,8 @@ if [[ "$BENCH_MODE" == "v3" ]]; then
             --tensor-parallel-size "$TP_SIZE" \
             --dtype auto --max-model-len 240000 \
             --max-num-batched-tokens 32768 \
-            --gpu-memory-utilization 0.92 &
+            --gpu-memory-utilization 0.92 \
+            --kv-cache-dtype fp8_e5m2 &
         VLLM_PIDS+=($!)
 
         if [[ -n "$VLLM_PORTS_LIST" ]]; then VLLM_PORTS_LIST="${VLLM_PORTS_LIST},"; fi
