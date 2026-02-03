@@ -3,11 +3,11 @@
 # Gonka V3 Benchmark Setup — vLLM 0.14.0 + gonka_poc (Universal)
 # For: H100, H200, A100 and other NVIDIA GPUs (NOT Blackwell)
 # Benchmark-only: no nginx, no mlnode, no tmux, no logrotate
+# NOTE: CUDA Toolkit NOT required — vLLM wheels include bundled CUDA runtime
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
 VLLM_VERSION="0.14.0"
-CUDA_VERSION="13.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 #################################
@@ -36,8 +36,9 @@ fi
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════╗"
-echo "║     Gonka V3 Benchmark Setup — vLLM ${VLLM_VERSION} + CUDA ${CUDA_VERSION}         ║"
+echo "║     Gonka V3 Benchmark Setup — vLLM ${VLLM_VERSION} (wheels)              ║"
 echo "║     UNIVERSAL: H100/H200/A100 (benchmark only)                  ║"
+echo "║     No CUDA Toolkit required — using bundled CUDA runtime       ║"
 echo "╚══════════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -51,37 +52,7 @@ apt-get install -y --no-install-recommends \
     lsof software-properties-common
 
 #################################
-# 2. CUDA TOOLKIT
-#################################
-if [ ! -d "/usr/local/cuda-13.0" ]; then
-    log_warning "CUDA 13.0 toolkit not found. Installing..."
-    if ! dpkg -l | grep -q cuda-keyring; then
-        log_info "Adding NVIDIA repository..."
-        wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb
-        dpkg -i /tmp/cuda-keyring.deb
-        apt-get update
-    fi
-    log_info "Installing CUDA 13.0 toolkit..."
-    apt-get install -y cuda-toolkit-13-0
-    log_success "CUDA 13.0 toolkit installed"
-fi
-
-# Set CUDA_HOME
-if [ -d "/usr/local/cuda-13.0" ]; then
-    CUDA_HOME="/usr/local/cuda-13.0"
-elif [ -d "/usr/local/cuda-12.6" ]; then
-    CUDA_HOME="/usr/local/cuda-12.6"
-    log_warning "Using CUDA 12.6"
-elif [ -d "/usr/local/cuda" ]; then
-    CUDA_HOME="/usr/local/cuda"
-else
-    log_error "CUDA not found"
-    exit 1
-fi
-log_info "CUDA_HOME: $CUDA_HOME"
-
-#################################
-# 3. PYTHON 3.12 + UV
+# 2. PYTHON 3.12 + UV
 #################################
 log_info "Installing Python 3.12..."
 add-apt-repository -y ppa:deadsnakes/ppa 2>/dev/null || true
@@ -102,7 +73,7 @@ else
 fi
 
 #################################
-# 4. CHECK GPU
+# 3. CHECK GPU
 #################################
 log_info "Checking GPU..."
 nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
@@ -126,14 +97,7 @@ fi
 log_success "Driver version OK"
 
 #################################
-# 5. ENVIRONMENT
-#################################
-export CUDA_HOME="$CUDA_HOME"
-export PATH="$CUDA_HOME/bin:$PATH"
-export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
-
-#################################
-# 6. REMOVE CONFLICTING PACKAGES
+# 4. REMOVE CONFLICTING PACKAGES
 #################################
 log_info "Removing conflicting packages..."
 apt-get remove -y python3-torch python3-triton 2>/dev/null || true
@@ -141,9 +105,9 @@ rm -rf /usr/lib/python3/dist-packages/torch* 2>/dev/null || true
 rm -rf /usr/lib/python3/dist-packages/triton* 2>/dev/null || true
 
 #################################
-# 7. INSTALL PYTORCH + VLLM
+# 5. INSTALL PYTORCH + VLLM
 #################################
-log_info "Installing vLLM ${VLLM_VERSION} with CUDA ${CUDA_VERSION}..."
+log_info "Installing vLLM ${VLLM_VERSION} (wheels with bundled CUDA)..."
 uv pip install --python python3.12 --system --break-system-packages --index-strategy unsafe-best-match \
     vllm==${VLLM_VERSION} \
     --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cu130 \
@@ -161,7 +125,7 @@ apt-get remove -y python3-scipy 2>/dev/null || true
 uv pip install --python python3.12 --system --break-system-packages --index-strategy unsafe-best-match scipy
 
 #################################
-# 8. FLASHINFER + TRITON
+# 6. FLASHINFER + TRITON
 #################################
 log_info "Installing FlashInfer 0.5.3..."
 uv pip uninstall --python python3.12 --system --break-system-packages flashinfer-python 2>/dev/null || true
@@ -176,7 +140,7 @@ uv pip install --python python3.12 --system --break-system-packages --index-stra
 rm -rf ~/.cache/flashinfer 2>/dev/null || true
 
 #################################
-# 9. VERIFY INSTALLATION
+# 7. VERIFY INSTALLATION
 #################################
 log_info "Verifying installation..."
 echo "  PyTorch: $(python3.12 -c 'import torch; print(torch.__version__)')"
@@ -186,7 +150,7 @@ python3.12 -c "import flashinfer; print('  FlashInfer: installed')" 2>/dev/null 
 python3.12 -c "import triton; print(f'  Triton: {triton.__version__}')" 2>/dev/null || echo "  Triton: not installed"
 
 #################################
-# 10. INSTALL GONKA PoC MODULE
+# 8. INSTALL GONKA PoC MODULE
 #################################
 log_poc "Installing gonka_poc module..."
 
@@ -221,7 +185,7 @@ else
 fi
 
 #################################
-# 11. PATCH api_server.py
+# 9. PATCH api_server.py
 #################################
 log_poc "Patching api_server.py for gonka_poc support..."
 
@@ -243,11 +207,10 @@ fi
 #################################
 echo ""
 echo "╔════════════════════════════════════════════════════════════════╗"
-echo "║  V3 SETUP COMPLETE — UNIVERSAL (H100/H200/A100)             ║"
+echo "║  V3 SETUP COMPLETE — UNIVERSAL (H100/H200/A100)               ║"
 echo "╠════════════════════════════════════════════════════════════════╣"
-echo "║  vLLM: ${VLLM_VERSION} + gonka_poc                                  ║"
-echo "║  GPU memory utilization: 0.95                                ║"
-echo "║  Ready for: bash run.sh --mode v3                            ║"
+echo "║  vLLM: ${VLLM_VERSION} + gonka_poc (bundled CUDA runtime)           ║"
+echo "║  Ready for: bash run.sh --mode v3                             ║"
 echo "╚════════════════════════════════════════════════════════════════╝"
 echo ""
 log_success "Setup complete!"
