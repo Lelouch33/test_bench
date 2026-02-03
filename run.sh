@@ -300,8 +300,9 @@ if [[ "$BENCH_MODE" == "v3" ]]; then
 
     # Определяем GPU
     GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l || echo "1")
-    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | xargs)
-    GPU_VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1 | xargs)
+    # NOTE: || true needed because pipefail + head can cause SIGPIPE (exit 141) with multiple GPUs
+    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | xargs || true)
+    GPU_VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | xargs || true)
     GPU_VRAM_GB=$((GPU_VRAM_MB / 1024))
     TOTAL_VRAM_GB=$((GPU_VRAM_GB * GPU_COUNT))
 
@@ -395,14 +396,13 @@ if [[ "$BENCH_MODE" == "v3" ]]; then
         fi
 
         log_info "Запуск инстанса ${i}: порт ${INST_PORT}, GPU [${GPU_IDS}]"
-        # enforce-eager обязателен: gonka_poc batch (32×1024=32768) > CUDA graph max (8192)
         CUDA_VISIBLE_DEVICES="$GPU_IDS" \
-        VLLM_USE_V1=1 VLLM_USE_CUDA_GRAPHS=0 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
+        VLLM_USE_V1=1 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
         python3.12 -m vllm.entrypoints.openai.api_server \
             --model "$VLLM_MODEL" --host 0.0.0.0 --port "$INST_PORT" \
-            --enforce-eager --tensor-parallel-size "$TP_SIZE" \
+            --tensor-parallel-size "$TP_SIZE" \
             --dtype auto --max-model-len 240000 \
-            --gpu-memory-utilization 0.95 &
+            --max-num-batched-tokens 32768 &
         VLLM_PIDS+=($!)
 
         if [[ -n "$VLLM_PORTS_LIST" ]]; then VLLM_PORTS_LIST="${VLLM_PORTS_LIST},"; fi
